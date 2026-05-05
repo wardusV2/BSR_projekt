@@ -6,14 +6,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.messaging.converter.MappingJackson2MessageConverter;
-import org.springframework.messaging.simp.stomp.*;
 import org.springframework.stereotype.Component;
-import org.springframework.web.socket.client.standard.StandardWebSocketClient;
-import org.springframework.web.socket.messaging.WebSocketStompClient;
-import org.springframework.web.socket.sockjs.client.SockJsClient;
-import org.springframework.web.socket.sockjs.client.WebSocketTransport;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -44,7 +39,6 @@ public class SatelliteClient {
     private static final String SERVICE_API_KEY =
             "SUPER_SECRET_SERVICE_KEY_123";
 
-
     /* ================= CONFIG ================= */
 
     @Value("${satellite.name:Service2}")
@@ -55,65 +49,36 @@ public class SatelliteClient {
 
     /* ================= STATE ================= */
 
-    private StompSession session;
+    private final RabbitTemplate rabbitTemplate;
     private final AtomicInteger counter = new AtomicInteger();
     private final HttpClient httpClient = HttpClient.newHttpClient();
     private final ObjectMapper mapper = new ObjectMapper();
 
-    /* =========================================================
-        CONNECT
-       ========================================================= */
-
-    @PostConstruct
-    public void connect() {
-
-        WebSocketStompClient client =
-                new WebSocketStompClient(
-                        new SockJsClient(List.of(
-                                new WebSocketTransport(
-                                        new StandardWebSocketClient()
-                                )
-                        ))
-                );
-
-        client.setMessageConverter(
-                new MappingJackson2MessageConverter()
-        );
-
-        client.connectAsync(
-                "ws://localhost:8081/main-ws",
-                new StompSessionHandlerAdapter() {
-                    @Override
-                    public void afterConnected(
-                            StompSession session,
-                            StompHeaders headers
-                    ) {
-                        logger.info("{} CONNECTED", serviceName);
-                        SatelliteClient.this.session = session;
-                        startLoop();
-                    }
-                }
-        );
+    public SatelliteClient(RabbitTemplate rabbitTemplate) {
+        this.rabbitTemplate = rabbitTemplate;
     }
 
     /* =========================================================
-        LOOP
+       LOOP – start po 10s, co 45s
        ========================================================= */
 
-    private void startLoop() {
+    @PostConstruct
+    public void startLoop() {
 
         ScheduledExecutorService scheduler =
-                Executors.newSingleThreadScheduledExecutor();
+                Executors.newSingleThreadScheduledExecutor(r -> {
+                    Thread t = new Thread(r, serviceName + "-loop");
+                    t.setDaemon(true);
+                    return t;
+                });
 
         scheduler.scheduleAtFixedRate(() -> {
 
-            if (session == null || !session.isConnected()) {
-                logger.warn("WebSocket not connected");
-                return;
-            }
-
             try {
                 List<UserDTO> users = fetchUsers();
+
+                logger.info("{} → przetwarzam {} użytkowników",
+                        serviceName, users.size());
 
                 for (UserDTO user : users) {
 
@@ -136,22 +101,32 @@ public class SatelliteClient {
                                     weight
                             );
 
+                    String routingKey = "vote." + serviceName;
+
+                    rabbitTemplate.convertAndSend(
+                            "votes.topic",   // exchange
+                            routingKey,
+                            message
+                    );
+
                     int msgNum = counter.incrementAndGet();
 
                     logger.info(
-                            "Service2 #{} → user {} → {}",
+                            "#{} → [{}] user={} category={}",
                             msgNum,
+                            routingKey,
                             user.id(),
                             bestCategory
                     );
 
-                    session.send("/app/from-service", message);
-
-                    Thread.sleep(200);
+                    Thread.sleep(200); // throttle
                 }
 
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                logger.warn("{} loop przerwany", serviceName);
             } catch (Exception e) {
-                logger.error("Service2 loop error", e);
+                logger.error("{} błąd w pętli", serviceName, e);
             }
 
         }, 10, 45, TimeUnit.SECONDS);
@@ -187,7 +162,7 @@ public class SatelliteClient {
     }
 
     /* =========================================================
-        SUBSCRIPTIONS
+       SUBSCRIPTIONS
        ========================================================= */
 
     private List<SubscribedUserDTO> fetchSubscriptions(int userId) {
@@ -219,7 +194,7 @@ public class SatelliteClient {
     }
 
     /* =========================================================
-        VIDEOS OF SUBSCRIBED USERS
+       VIDEOS OF SUBSCRIBED USERS
        ========================================================= */
 
     private List<VideoDTO> fetchVideosOfSubscribedUsers(
@@ -255,11 +230,12 @@ public class SatelliteClient {
 
             } catch (Exception ignored) {}
         }
+
         return result;
     }
 
     /* =========================================================
-        CATEGORY
+       CATEGORY LOGIC
        ========================================================= */
 
     private String calculateCategory(List<VideoDTO> videos) {
