@@ -8,14 +8,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.messaging.converter.MappingJackson2MessageConverter;
-import org.springframework.messaging.simp.stomp.*;
 import org.springframework.stereotype.Component;
-import org.springframework.web.socket.client.standard.StandardWebSocketClient;
-import org.springframework.web.socket.messaging.WebSocketStompClient;
-import org.springframework.web.socket.sockjs.client.SockJsClient;
-import org.springframework.web.socket.sockjs.client.WebSocketTransport;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -47,65 +42,42 @@ public class SatelliteClient {
     @Value("${satellite.weight:1.0}")
     private double weight;
 
-    private StompSession session;
+    private final RabbitTemplate rabbitTemplate;
     private final AtomicInteger messageCounter = new AtomicInteger(0);
     private final HttpClient httpClient = HttpClient.newHttpClient();
     private final ObjectMapper mapper = new ObjectMapper();
 
-    /* =========================================================
-       CONNECT TO MAIN SERVICE
-       ========================================================= */
-    @PostConstruct
-    public void connect() {
-
-        logger.info("{} connecting to MainService...", serviceName);
-
-        WebSocketStompClient client = new WebSocketStompClient(
-                new SockJsClient(List.of(
-                        new WebSocketTransport(new StandardWebSocketClient())
-                ))
-        );
-
-        client.setMessageConverter(new MappingJackson2MessageConverter());
-
-        client.connectAsync(
-                "ws://localhost:8081/main-ws",
-                new StompSessionHandlerAdapter() {
-                    @Override
-                    public void afterConnected(
-                            StompSession session,
-                            StompHeaders headers
-                    ) {
-                        logger.info("{} CONNECTED", serviceName);
-                        SatelliteClient.this.session = session;
-                        startSendingLoop();
-                    }
-                }
-        );
+    public SatelliteClient(RabbitTemplate rabbitTemplate) {
+        this.rabbitTemplate = rabbitTemplate;
     }
 
     /* =========================================================
-       MAIN LOOP
+       LOOP – start po 10s, co 30s
        ========================================================= */
-    private void startSendingLoop() {
+
+    @PostConstruct
+    public void startSendingLoop() {
 
         ScheduledExecutorService scheduler =
-                Executors.newSingleThreadScheduledExecutor();
+                Executors.newSingleThreadScheduledExecutor(r -> {
+                    Thread t = new Thread(r, serviceName + "-loop");
+                    t.setDaemon(true);
+                    return t;
+                });
 
         scheduler.scheduleAtFixedRate(() -> {
-
-            if (session == null || !session.isConnected()) {
-                logger.warn("WebSocket not connected");
-                return;
-            }
 
             try {
                 List<UserDTO> users = fetchUsers();
                 List<VideoDTO> videos = fetchVideos();
 
+                logger.info("{} → users={}, videos={}",
+                        serviceName, users.size(), videos.size());
+
                 for (UserDTO user : users) {
 
-                    String bestCategory = calculateMostPopularCategory(videos);
+                    String bestCategory =
+                            calculateMostPopularCategory(videos);
 
                     MostWatchedCategoryMessage payload =
                             new MostWatchedCategoryMessage(
@@ -120,30 +92,41 @@ public class SatelliteClient {
                                     weight
                             );
 
+                    String routingKey = "vote." + serviceName;
+
+                    rabbitTemplate.convertAndSend(
+                            "votes.topic",
+                            routingKey,
+                            message
+                    );
+
                     int msgNum = messageCounter.incrementAndGet();
 
                     logger.info(
-                            "Sending #{} → user {} → ({})",
+                            "#{} → [{}] user={} category={}",
                             msgNum,
+                            routingKey,
                             user.id(),
                             bestCategory
                     );
 
-                    session.send("/app/from-service", message);
-
                     Thread.sleep(300);
                 }
 
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                logger.warn("{} loop przerwany", serviceName);
             } catch (Exception e) {
-                logger.error("Error in main loop", e);
+                logger.error("{} błąd w pętli", serviceName, e);
             }
 
         }, 10, 30, TimeUnit.SECONDS);
     }
 
     /* =========================================================
-       FETCH USERS FROM REST
+       FETCH USERS
        ========================================================= */
+
     private List<UserDTO> fetchUsers() {
 
         try {
@@ -173,8 +156,9 @@ public class SatelliteClient {
     }
 
     /* =========================================================
-       FETCH VIDEOS FROM REST
+       FETCH VIDEOS
        ========================================================= */
+
     private List<VideoDTO> fetchVideos() {
 
         try {
@@ -204,8 +188,9 @@ public class SatelliteClient {
     }
 
     /* =========================================================
-       CALCULATE MOST POPULAR CATEGORY
+       GLOBAL TREND (najpopularniejsza kategoria)
        ========================================================= */
+
     private String calculateMostPopularCategory(List<VideoDTO> videos) {
 
         return videos.stream()

@@ -6,14 +6,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.messaging.converter.MappingJackson2MessageConverter;
-import org.springframework.messaging.simp.stomp.*;
 import org.springframework.stereotype.Component;
-import org.springframework.web.socket.client.standard.StandardWebSocketClient;
-import org.springframework.web.socket.messaging.WebSocketStompClient;
-import org.springframework.web.socket.sockjs.client.SockJsClient;
-import org.springframework.web.socket.sockjs.client.WebSocketTransport;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -28,14 +23,13 @@ import java.util.stream.Collectors;
  * SERVICE7
  *
  * Algorytm:
- * Połączenie kategorii z:
- *  - subskrypcji
- *  - polubień
+ *  - subskrypcje
+ *  - lajki
+ *  - merge kategorii
  *
  * Fault:
  *  CRASH 20%
  */
-
 @Component
 public class SatelliteClient {
 
@@ -43,7 +37,6 @@ public class SatelliteClient {
             LoggerFactory.getLogger(SatelliteClient.class);
 
     private static final Random random = new Random();
-
 
     /* ================= API ================= */
 
@@ -59,10 +52,8 @@ public class SatelliteClient {
     private static final String USER_LIKED_URL =
             "http://localhost:8080/users/";
 
-
     private static final String SERVICE_API_KEY =
             "SUPER_SECRET_SERVICE_KEY_123";
-
 
     /* ================= CONFIG ================= */
 
@@ -75,79 +66,32 @@ public class SatelliteClient {
     @Value("${fault.injection.crash:0.2}")
     private double crashProbability;
 
-
     /* ================= STATE ================= */
 
-    private StompSession session;
+    private final RabbitTemplate rabbitTemplate;
+    private final AtomicInteger counter = new AtomicInteger();
+    private final HttpClient httpClient = HttpClient.newHttpClient();
+    private final ObjectMapper mapper = new ObjectMapper();
 
-    private final AtomicInteger counter =
-            new AtomicInteger();
-
-    private final HttpClient httpClient =
-            HttpClient.newHttpClient();
-
-    private final ObjectMapper mapper =
-            new ObjectMapper();
-
+    public SatelliteClient(RabbitTemplate rabbitTemplate) {
+        this.rabbitTemplate = rabbitTemplate;
+    }
 
     /* =========================================================
-       CONNECT
+       LOOP – start po 15s, co 40s
        ========================================================= */
 
     @PostConstruct
-    public void connect() {
-
-        logger.info("{} connecting...", serviceName);
-
-        WebSocketStompClient client =
-                new WebSocketStompClient(
-                        new SockJsClient(List.of(
-                                new WebSocketTransport(
-                                        new StandardWebSocketClient()
-                                )
-                        ))
-                );
-
-        client.setMessageConverter(
-                new MappingJackson2MessageConverter()
-        );
-
-        client.connectAsync(
-                "ws://localhost:8081/main-ws",
-                new StompSessionHandlerAdapter() {
-
-                    @Override
-                    public void afterConnected(
-                            StompSession session,
-                            StompHeaders headers
-                    ) {
-
-                        logger.info("{} CONNECTED", serviceName);
-
-                        SatelliteClient.this.session = session;
-
-                        startLoop();
-                    }
-                }
-        );
-    }
-
-
-    /* =========================================================
-       LOOP
-       ========================================================= */
-
-    private void startLoop() {
+    public void startLoop() {
 
         ScheduledExecutorService scheduler =
-                Executors.newSingleThreadScheduledExecutor();
+                Executors.newSingleThreadScheduledExecutor(r -> {
+                    Thread t = new Thread(r, serviceName + "-loop");
+                    t.setDaemon(true);
+                    return t;
+                });
 
         scheduler.scheduleAtFixedRate(() -> {
-
-            if (session == null || !session.isConnected()) {
-                logger.warn("WebSocket not connected");
-                return;
-            }
 
             try {
 
@@ -157,15 +101,14 @@ public class SatelliteClient {
 
                 if (random.nextDouble() < crashProbability) {
 
-                    logger.error(
-                            " FAULT INJECTION: SERVICE7 CRASH"
-                    );
+                    logger.error("💥 FAULT INJECTION → SERVICE7 CRASH");
 
                     System.exit(1);
                 }
 
-
                 List<UserDTO> users = fetchUsers();
+
+                logger.info("{} → users={}", serviceName, users.size());
 
                 for (UserDTO user : users) {
 
@@ -180,7 +123,6 @@ public class SatelliteClient {
                     String subCategory =
                             calculateCategoryFromVideos(videos);
 
-
                     /* ---------- LIKES ---------- */
 
                     List<LikedVideoDTO> likes =
@@ -188,7 +130,6 @@ public class SatelliteClient {
 
                     String likedCategory =
                             calculateCategoryFromLikes(likes);
-
 
                     /* ---------- COMBINE ---------- */
 
@@ -201,7 +142,6 @@ public class SatelliteClient {
                                 subCategory + "," + likedCategory;
                     }
 
-
                     ServiceMessage message =
                             new ServiceMessage(
                                     serviceName,
@@ -212,51 +152,48 @@ public class SatelliteClient {
                                     weight
                             );
 
-                    int msgNum =
-                            counter.incrementAndGet();
+                    String routingKey = "vote." + serviceName;
 
-                    logger.info(
-                            "Service7 #{} → user {} → {}",
-                            msgNum,
-                            user.id(),
-                            combinedCategory
+                    rabbitTemplate.convertAndSend(
+                            "votes.topic",
+                            routingKey,
+                            message
                     );
 
-                    session.send(
-                            "/app/from-service",
-                            message
+                    int msgNum = counter.incrementAndGet();
+
+                    logger.info(
+                            "#{} → [{}] user={} category={}",
+                            msgNum,
+                            routingKey,
+                            user.id(),
+                            combinedCategory
                     );
 
                     Thread.sleep(250);
                 }
 
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                logger.warn("{} loop przerwany", serviceName);
             } catch (Exception e) {
-
-                logger.error(
-                        "Service7 loop error",
-                        e
-                );
+                logger.error("Service7 loop error", e);
             }
 
         }, 15, 40, TimeUnit.SECONDS);
     }
 
-
     /* =========================================================
-       👤 USERS
+       USERS
        ========================================================= */
 
     private List<UserDTO> fetchUsers() {
 
         try {
-
             HttpRequest request =
                     HttpRequest.newBuilder()
                             .uri(URI.create(USERS_URL))
-                            .header(
-                                    "X-SERVICE-KEY",
-                                    SERVICE_API_KEY
-                            )
+                            .header("X-SERVICE-KEY", SERVICE_API_KEY)
                             .GET()
                             .build();
 
@@ -274,35 +211,22 @@ public class SatelliteClient {
             );
 
         } catch (Exception e) {
-
             logger.error("Cannot fetch users", e);
-
             return List.of();
         }
     }
 
-
     /* =========================================================
-        SUBSCRIPTIONS
+       SUBSCRIPTIONS
        ========================================================= */
 
-    private List<SubscribedUserDTO> fetchSubscriptions(
-            int userId
-    ) {
+    private List<SubscribedUserDTO> fetchSubscriptions(int userId) {
 
         try {
-
             HttpRequest request =
                     HttpRequest.newBuilder()
-                            .uri(
-                                    URI.create(
-                                            SUBSCRIPTIONS_URL + userId
-                                    )
-                            )
-                            .header(
-                                    "X-SERVICE-KEY",
-                                    SERVICE_API_KEY
-                            )
+                            .uri(URI.create(SUBSCRIPTIONS_URL + userId))
+                            .header("X-SERVICE-KEY", SERVICE_API_KEY)
                             .GET()
                             .build();
 
@@ -320,19 +244,13 @@ public class SatelliteClient {
             );
 
         } catch (Exception e) {
-
-            logger.warn(
-                    "No subscriptions for user {}",
-                    userId
-            );
-
+            logger.warn("No subscriptions for user {}", userId);
             return List.of();
         }
     }
 
-
     /* =========================================================
-        VIDEOS
+       VIDEOS
        ========================================================= */
 
     private List<VideoDTO> fetchVideosOfSubscribedUsers(
@@ -344,18 +262,12 @@ public class SatelliteClient {
         for (SubscribedUserDTO user : users) {
 
             try {
-
                 HttpRequest request =
                         HttpRequest.newBuilder()
-                                .uri(
-                                        URI.create(
-                                                USER_VIDEOS_URL + user.id()
-                                        )
-                                )
-                                .header(
-                                        "X-SERVICE-KEY",
-                                        SERVICE_API_KEY
-                                )
+                                .uri(URI.create(
+                                        USER_VIDEOS_URL + user.id()
+                                ))
+                                .header("X-SERVICE-KEY", SERVICE_API_KEY)
                                 .GET()
                                 .build();
 
@@ -375,39 +287,26 @@ public class SatelliteClient {
                 );
 
             } catch (Exception e) {
-
-                logger.warn(
-                        "Cannot fetch videos for {}",
-                        user.id()
-                );
+                logger.warn("Cannot fetch videos for {}", user.id());
             }
         }
 
         return result;
     }
 
-
     /* =========================================================
-        LIKES
+       LIKES
        ========================================================= */
 
-    private List<LikedVideoDTO> fetchLikedVideos(
-            int userId
-    ) {
+    private List<LikedVideoDTO> fetchLikedVideos(int userId) {
 
         try {
-
             HttpRequest request =
                     HttpRequest.newBuilder()
-                            .uri(
-                                    URI.create(
-                                            USER_LIKED_URL + userId + "/liked"
-                                    )
-                            )
-                            .header(
-                                    "X-SERVICE-KEY",
-                                    SERVICE_API_KEY
-                            )
+                            .uri(URI.create(
+                                    USER_LIKED_URL + userId + "/liked"
+                            ))
+                            .header("X-SERVICE-KEY", SERVICE_API_KEY)
                             .GET()
                             .build();
 
@@ -425,75 +324,48 @@ public class SatelliteClient {
             );
 
         } catch (Exception e) {
-
-            logger.warn(
-                    "No liked videos for user {}",
-                    userId
-            );
-
+            logger.warn("No liked videos for user {}", userId);
             return List.of();
         }
     }
 
-
     /* =========================================================
-        CATEGORY LOGIC
+       CATEGORY LOGIC
        ========================================================= */
 
-    private String calculateCategoryFromVideos(
-            List<VideoDTO> videos
-    ) {
+    private String calculateCategoryFromVideos(List<VideoDTO> videos) {
 
         return videos.stream()
-
                 .map(VideoDTO::category)
-
                 .filter(Objects::nonNull)
-
                 .collect(Collectors.groupingBy(
                         c -> c,
                         Collectors.counting()
                 ))
-
                 .entrySet()
-
                 .stream()
-
                 .max(Map.Entry.comparingByValue())
-
                 .map(Map.Entry::getKey)
-
                 .orElse("OTHER");
     }
 
-
-    private String calculateCategoryFromLikes(
-            List<LikedVideoDTO> videos
-    ) {
+    private String calculateCategoryFromLikes(List<LikedVideoDTO> videos) {
 
         if (videos.isEmpty()) {
             return "OTHER";
         }
 
         return videos.stream()
-
                 .map(LikedVideoDTO::category)
-
                 .filter(Objects::nonNull)
-
                 .collect(Collectors.groupingBy(
                         c -> c,
                         Collectors.counting()
                 ))
-
                 .entrySet()
-
                 .stream()
-
                 .max(Map.Entry.comparingByValue())
-
                 .map(Map.Entry::getKey)
-
                 .orElse("OTHER");
     }
 }

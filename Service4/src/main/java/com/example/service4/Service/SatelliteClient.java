@@ -9,14 +9,9 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.messaging.converter.MappingJackson2MessageConverter;
-import org.springframework.messaging.simp.stomp.*;
 import org.springframework.stereotype.Component;
-import org.springframework.web.socket.client.standard.StandardWebSocketClient;
-import org.springframework.web.socket.messaging.WebSocketStompClient;
-import org.springframework.web.socket.sockjs.client.SockJsClient;
-import org.springframework.web.socket.sockjs.client.WebSocketTransport;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -52,7 +47,7 @@ public class SatelliteClient {
 
     /* ================= FIELDS ================= */
 
-    private StompSession session;
+    private final RabbitTemplate rabbitTemplate;
 
     private final AtomicInteger messageCounter =
             new AtomicInteger(0);
@@ -63,70 +58,33 @@ public class SatelliteClient {
     private final ObjectMapper mapper =
             new ObjectMapper();
 
-    public SatelliteClient() {
-        mapper.registerModule(new JavaTimeModule());
+    public SatelliteClient(RabbitTemplate rabbitTemplate) {
+        this.rabbitTemplate = rabbitTemplate;
+        this.mapper.registerModule(new JavaTimeModule());
     }
 
     /* =========================================================
-        CONNECT
+       LOOP – start po 10s, co 30s
        ========================================================= */
 
     @PostConstruct
-    public void connect() {
-
-        logger.info("{} connecting to MainService...", serviceName);
-
-        WebSocketStompClient client =
-                new WebSocketStompClient(
-                        new SockJsClient(List.of(
-                                new WebSocketTransport(
-                                        new StandardWebSocketClient()
-                                )
-                        ))
-                );
-
-        client.setMessageConverter(
-                new MappingJackson2MessageConverter()
-        );
-
-        client.connectAsync(
-                "ws://localhost:8081/main-ws",
-                new StompSessionHandlerAdapter() {
-
-                    @Override
-                    public void afterConnected(
-                            StompSession session,
-                            StompHeaders headers
-                    ) {
-                        logger.info("{} CONNECTED", serviceName);
-
-                        SatelliteClient.this.session = session;
-
-                        startSendingLoop();
-                    }
-                }
-        );
-    }
-
-    /* =========================================================
-        MAIN LOOP
-       ========================================================= */
-
-    private void startSendingLoop() {
+    public void startSendingLoop() {
 
         ScheduledExecutorService scheduler =
-                Executors.newSingleThreadScheduledExecutor();
+                Executors.newSingleThreadScheduledExecutor(r -> {
+                    Thread t = new Thread(r, serviceName + "-loop");
+                    t.setDaemon(true);
+                    return t;
+                });
 
         scheduler.scheduleAtFixedRate(() -> {
-
-            if (session == null || !session.isConnected()) {
-                logger.warn("WebSocket not connected");
-                return;
-            }
 
             try {
 
                 List<UserDTO> users = fetchUsers();
+
+                logger.info("{} → przetwarzam {} użytkowników",
+                        serviceName, users.size());
 
                 for (UserDTO user : users) {
 
@@ -149,34 +107,40 @@ public class SatelliteClient {
                                     weight
                             );
 
+                    String routingKey = "vote." + serviceName;
+
+                    rabbitTemplate.convertAndSend(
+                            "votes.topic",
+                            routingKey,
+                            message
+                    );
+
                     int msgNum =
                             messageCounter.incrementAndGet();
 
                     logger.info(
-                            "Sending #{} → user {} → {}",
+                            "#{} → [{}] user={} category={}",
                             msgNum,
+                            routingKey,
                             user.id(),
                             rarestCategory
                     );
 
-                    session.send(
-                            "/app/from-service",
-                            message
-                    );
-
                     Thread.sleep(300);
-
                 }
 
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                logger.warn("{} loop przerwany", serviceName);
             } catch (Exception e) {
-                logger.error("Error in main loop", e);
+                logger.error("{} błąd w pętli", serviceName, e);
             }
 
         }, 10, 30, TimeUnit.SECONDS);
     }
 
     /* =========================================================
-        FETCH USERS
+       FETCH USERS
        ========================================================= */
 
     private List<UserDTO> fetchUsers() {
@@ -186,10 +150,7 @@ public class SatelliteClient {
             HttpRequest request =
                     HttpRequest.newBuilder()
                             .uri(URI.create(USERS_URL))
-                            .header(
-                                    "X-SERVICE-KEY",
-                                    SERVICE_API_KEY
-                            )
+                            .header("X-SERVICE-KEY", SERVICE_API_KEY)
                             .GET()
                             .build();
 
@@ -214,7 +175,7 @@ public class SatelliteClient {
     }
 
     /* =========================================================
-        FETCH HISTORY
+       FETCH HISTORY
        ========================================================= */
 
     private List<WatchHistoryDTO> fetchWatchHistory(int userId) {
@@ -226,10 +187,7 @@ public class SatelliteClient {
                             .uri(URI.create(
                                     WATCH_HISTORY_BASE_URL + userId
                             ))
-                            .header(
-                                    "X-SERVICE-KEY",
-                                    SERVICE_API_KEY
-                            )
+                            .header("X-SERVICE-KEY", SERVICE_API_KEY)
                             .GET()
                             .build();
 
@@ -238,7 +196,7 @@ public class SatelliteClient {
                             request,
                             HttpResponse.BodyHandlers.ofString()
                     );
-            logger.info("RAW liked response for user {}: {}", userId, response.body());
+
             return Arrays.asList(
                     mapper.readValue(
                             response.body(),
@@ -259,7 +217,7 @@ public class SatelliteClient {
     }
 
     /* =========================================================
-        CALCULATE RAREST CATEGORY
+       RAREST CATEGORY (Twoja logika)
        ========================================================= */
 
     private String calculateRarestCategory(
@@ -272,18 +230,13 @@ public class SatelliteClient {
 
         return history.stream()
                 .filter(h -> h.getCategory() != null)
-
-                // grupowanie po kategorii
                 .collect(Collectors.groupingBy(
                         WatchHistoryDTO::getCategory,
                         Collectors.counting()
                 ))
-
-                // minimum zamiast maksimum
                 .entrySet()
                 .stream()
-                .min(Map.Entry.comparingByValue())
-
+                .min(Map.Entry.comparingByValue()) //
                 .map(Map.Entry::getKey)
                 .orElse("OTHER");
     }
