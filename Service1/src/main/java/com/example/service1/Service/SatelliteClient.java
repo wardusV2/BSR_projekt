@@ -1,6 +1,7 @@
 package com.example.service1.Service;
 
 import com.example.mainservice.DTO.ServiceMessage;
+import com.example.service1.Config.RabbitMQSatelliteConfig;
 import com.example.service1.DTO.MostWatchedCategoryMessage;
 import com.example.service1.DTO.UserDTO;
 import com.example.service1.DTO.WatchHistoryDTO;
@@ -9,16 +10,10 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.messaging.converter.MappingJackson2MessageConverter;
-import org.springframework.messaging.simp.stomp.*;
 import org.springframework.stereotype.Component;
-import org.springframework.web.socket.client.standard.StandardWebSocketClient;
-import org.springframework.web.socket.messaging.WebSocketStompClient;
-import org.springframework.web.socket.sockjs.client.SockJsClient;
-import org.springframework.web.socket.sockjs.client.WebSocketTransport;
 
-import java.lang.reflect.Type;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -28,20 +23,24 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
+/**
+ * Satelita Service1 – wysyła głosy do MainService przez RabbitMQ.
+ *
+ * Routing key: vote.{serviceName}  np. "vote.Service1"
+ * Exchange:    votes.topic (Topic Exchange, deklarowany przez MainService)
+ *
+ * Skopiuj do service2 / service3 – zmień tylko package i domyślne wartości
+ * @Value (satellite.name, satellite.weight).
+ */
 @Component
 public class SatelliteClient {
 
     private static final Logger logger =
             LoggerFactory.getLogger(SatelliteClient.class);
 
-    private static final String SERVICE_API_KEY =
-            "SUPER_SECRET_SERVICE_KEY_123";
-
-    private static final String USERS_URL =
-            "http://localhost:8080/api/users/all";
-
-    private static final String WATCH_HISTORY_BASE_URL =
-            "http://localhost:8080/api/history/get/";
+    private static final String SERVICE_API_KEY   = "SUPER_SECRET_SERVICE_KEY_123";
+    private static final String USERS_URL          = "http://localhost:8080/api/users/all";
+    private static final String WATCH_HISTORY_BASE = "http://localhost:8080/api/history/get/";
 
     @Value("${satellite.name:Service1}")
     private String serviceName;
@@ -49,192 +48,128 @@ public class SatelliteClient {
     @Value("${satellite.weight:2.0}")
     private double weight;
 
-    private StompSession session;
-    private final AtomicInteger messageCounter = new AtomicInteger(0);
-    private final HttpClient httpClient = HttpClient.newHttpClient();
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final RabbitTemplate rabbitTemplate;
+    private final AtomicInteger  messageCounter = new AtomicInteger(0);
+    private final HttpClient     httpClient     = HttpClient.newHttpClient();
+    private final ObjectMapper   mapper;
 
-    public SatelliteClient() {
-        mapper.registerModule(new JavaTimeModule());
+    public SatelliteClient(RabbitTemplate rabbitTemplate) {
+        this.rabbitTemplate = rabbitTemplate;
+        this.mapper = new ObjectMapper();
+        this.mapper.registerModule(new JavaTimeModule());
     }
 
-    /* =========================================================
-        CONNECT TO MAIN SERVICE
-       ========================================================= */
+    /* ================================================================
+       MAIN LOOP – startuje 10 s po uruchomieniu, powtarza co 30 s
+       ================================================================ */
+
     @PostConstruct
-    public void connect() {
-
-        logger.info("{} connecting to MainService...", serviceName);
-
-        WebSocketStompClient client = new WebSocketStompClient(
-                new SockJsClient(List.of(
-                        new WebSocketTransport(new StandardWebSocketClient())
-                ))
-        );
-
-        client.setMessageConverter(
-                new MappingJackson2MessageConverter()
-        );
-
-        client.connectAsync(
-                "ws://localhost:8081/main-ws",
-                new StompSessionHandlerAdapter() {
-
-                    @Override
-                    public void afterConnected(
-                            StompSession session,
-                            StompHeaders headers
-                    ) {
-                        logger.info("{} CONNECTED", serviceName);
-                        SatelliteClient.this.session = session;
-                        startSendingLoop();
-                    }
-                }
-        );
-    }
-
-    /* =========================================================
-        MAIN LOOP
-       ========================================================= */
-    private void startSendingLoop() {
+    public void startSendingLoop() {
 
         ScheduledExecutorService scheduler =
-                Executors.newSingleThreadScheduledExecutor();
+                Executors.newSingleThreadScheduledExecutor(r -> {
+                    Thread t = new Thread(r, serviceName + "-loop");
+                    t.setDaemon(true);
+                    return t;
+                });
 
         scheduler.scheduleAtFixedRate(() -> {
 
-            if (session == null || !session.isConnected()) {
-                logger.warn("WebSocket not connected");
-                return;
-            }
-
             try {
                 List<UserDTO> users = fetchUsers();
+                logger.info("{} → przetwarzam {} użytkowników", serviceName, users.size());
 
                 for (UserDTO user : users) {
 
-                    List<WatchHistoryDTO> history =
-                            fetchWatchHistory(user.id());
-
-                    String bestCategory =
-                            calculateMostWatchedCategory(history);
+                    List<WatchHistoryDTO> history = fetchWatchHistory(user.id());
+                    String bestCategory = calculateMostWatchedCategory(history);
 
                     MostWatchedCategoryMessage payload =
-                            new MostWatchedCategoryMessage(
-                                    user.id(),
-                                    bestCategory
-                            );
+                            new MostWatchedCategoryMessage(user.id(), bestCategory);
 
                     ServiceMessage message =
-                            new ServiceMessage(
-                                    serviceName,
-                                    payload,
-                                    weight
-                            );
+                            new ServiceMessage(serviceName, payload, weight);
 
-                    int msgNum = messageCounter.incrementAndGet();
+                    // Routing key: vote.Service1 / vote.Service2 / …
+                    String routingKey = "vote." + serviceName;
 
-                    logger.info(
-                            "Sending #{} → user {} → {}",
-                            msgNum,
-                            user.id(),
-                            bestCategory
+                    rabbitTemplate.convertAndSend(
+                            RabbitMQSatelliteConfig.VOTES_EXCHANGE,
+                            routingKey,
+                            message
                     );
 
-                    session.send("/app/from-service", message);
+                    int msgNum = messageCounter.incrementAndGet();
+                    logger.info("#{} → [{}] user={} category={}",
+                            msgNum, routingKey, user.id(), bestCategory);
 
-                    Thread.sleep(300);
+                    Thread.sleep(300); // throttle między użytkownikami
                 }
 
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                logger.warn("{} loop przerwany", serviceName);
             } catch (Exception e) {
-                logger.error("Error in main loop", e);
+                logger.error("{} błąd w pętli głównej", serviceName, e);
             }
 
         }, 10, 30, TimeUnit.SECONDS);
     }
 
-    /* =========================================================
-        FETCH USERS
-       ========================================================= */
-    private List<UserDTO> fetchUsers() {
+    /* ================================================================
+       HTTP – pobierz użytkowników
+       ================================================================ */
 
+    private List<UserDTO> fetchUsers() {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(USERS_URL))
                     .header("X-SERVICE-KEY", SERVICE_API_KEY)
-                    .GET()
-                    .build();
+                    .GET().build();
 
             HttpResponse<String> response =
-                    httpClient.send(
-                            request,
-                            HttpResponse.BodyHandlers.ofString()
-                    );
+                    httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
-            return Arrays.asList(
-                    mapper.readValue(
-                            response.body(),
-                            UserDTO[].class
-                    )
-            );
-
+            return Arrays.asList(mapper.readValue(response.body(), UserDTO[].class));
         } catch (Exception e) {
-            logger.error("Cannot fetch users", e);
+            logger.error("Nie można pobrać użytkowników", e);
             return List.of();
         }
     }
 
-    /* =========================================================
-        FETCH WATCH HISTORY
-       ========================================================= */
-    private List<WatchHistoryDTO> fetchWatchHistory(int userId) {
+    /* ================================================================
+       HTTP – historia oglądania dla użytkownika
+       ================================================================ */
 
+    private List<WatchHistoryDTO> fetchWatchHistory(int userId) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(
-                            WATCH_HISTORY_BASE_URL + userId
-                    ))
+                    .uri(URI.create(WATCH_HISTORY_BASE + userId))
                     .header("X-SERVICE-KEY", SERVICE_API_KEY)
-                    .GET()
-                    .build();
+                    .GET().build();
 
             HttpResponse<String> response =
-                    httpClient.send(
-                            request,
-                            HttpResponse.BodyHandlers.ofString()
-                    );
+                    httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
-            return Arrays.asList(
-                    mapper.readValue(
-                            response.body(),
-                            WatchHistoryDTO[].class
-                    )
-            );
-
+            return Arrays.asList(mapper.readValue(response.body(), WatchHistoryDTO[].class));
         } catch (Exception e) {
-            logger.error(
-                    "Cannot fetch watch history for user {}",
-                    userId,
-                    e
-            );
+            logger.error("Nie można pobrać historii dla user {}", userId, e);
             return List.of();
         }
     }
 
-    /* =========================================================
-        CALCULATE CATEGORY
-       ========================================================= */
-    private String calculateMostWatchedCategory(
-            List<WatchHistoryDTO> history
-    ) {
+    /* ================================================================
+       LOGIKA – najczęściej oglądana kategoria
+       ================================================================ */
+
+    private String calculateMostWatchedCategory(List<WatchHistoryDTO> history) {
         return history.stream()
                 .filter(h -> h.getCategory() != null)
                 .collect(Collectors.groupingBy(
                         WatchHistoryDTO::getCategory,
                         Collectors.counting()
                 ))
-                .entrySet()
-                .stream()
+                .entrySet().stream()
                 .max(Map.Entry.comparingByValue())
                 .map(Map.Entry::getKey)
                 .orElse("NONE");
