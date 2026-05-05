@@ -1,0 +1,226 @@
+.profile-container {
+  padding: 24px;
+  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+  min-height: 100vh;
+}
+
+.profile-header {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+  border: none;
+  margin-bottom: 0;
+}
+
+.profile-header .ant-card-body {
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 12px;
+  backdrop-filter: blur(10px);
+}
+
+.stats-card {
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  border: none;
+  background: white;
+}
+
+.stats-card .ant-card-head {
+  border-bottom: 2px solid #f0f0f0;
+  background: linear-gradient(90deg, #1890ff, #40a9ff);
+  border-radius: 12px 12px 0 0;
+}
+
+.stats-card .ant-card-head-title {
+  color: white;
+  font-weight: 600;
+}
+
+.video-card {
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  border: none;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.video-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+}
+
+.video-thumbnail {
+  position: relative;
+  overflow: hidden;
+}
+
+.video-thumbnail img {
+  transition: transform 0.3s ease;
+}
+
+.video-card:hover .video-thumbnail img {
+  transform: scale(1.05);
+}
+
+.video-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.video-card:hover .video-overlay {
+  opacity: 1;
+}
+
+.play-icon {
+  font-size: 48px;
+  color: white;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.ant-card {
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  border: none;
+  background: white;
+}
+
+.ant-card-head {
+  border-bottom: 2px solid #f0f0f0;
+  background: linear-gradient(90deg, #f8f9fa, #e9ecef);
+}
+
+.ant-card-head-title {
+  font-weight: 600;
+  color: #262626;
+}
+
+.ant-collapse-ghost > .ant-collapse-item > .ant-collapse-header {
+  padding: 12px 0;
+  font-weight: 500;
+}
+
+.ant-collapse-ghost > .ant-collapse-item > .ant-collapse-content > .ant-collapse-content-box {
+  padding: 12px 0;
+}
+
+.ant-list-item {
+  border-bottom: 1px solid #f0f0f0;
+  padding: 12px 0;
+}
+
+.ant-list-item:last-child {
+  border-bottom: none;
+}
+
+.ant-tag {
+  border-radius: 20px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.ant-btn {
+  border-radius: 8px;
+  font-weight: 500;
+  transition: all 0.3s ease;
+}
+
+.ant-btn-primary {
+  background: linear-gradient(135deg, #1890ff, #40a9ff);
+  border: none;
+}
+
+.ant-btn-primary:hover {
+  background: linear-gradient(135deg, #40a9ff, #1890ff);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(24, 144, 255, 0.3);
+}
+
+.ant-statistic-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: #8c8c8c;
+  margin-bottom: 4px;
+}
+
+.ant-statistic-content {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.ant-badge-dot {
+  box-shadow: 0 0 0 2px white;
+}
+
+.ant-empty {
+  padding: 48px 24px;
+}
+
+.ant-empty-description {
+  color: #8c8c8c;
+  font-size: 14px;
+}
+
+/* Responsywność */
+@media (max-width: 768px) {
+  .profile-container {
+    padding: 16px;
+  }
+  
+  .profile-header .ant-card-body {
+    padding: 16px;
+  }
+  
+  .video-card {
+    margin-bottom: 16px;
+  }
+  
+  .play-icon {
+    font-size: 36px;
+  }
+}
+
+/* Animacje */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ant-card {
+  animation: fadeInUp 0.5s ease forwards;
+}
+
+.ant-card:nth-child(2) {
+  animation-delay: 0.1s;
+}
+
+.ant-card:nth-child(3) {
+  animation-delay: 0.2s;
+}
+
+/* Hover effects */
+.ant-list-item:hover {
+  background: rgba(24, 144, 255, 0.02);
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.ant-collapse-header:hover {
+  background: rgba(24, 144, 255, 0.02) !important;
+  border-radius: 8px;
+}

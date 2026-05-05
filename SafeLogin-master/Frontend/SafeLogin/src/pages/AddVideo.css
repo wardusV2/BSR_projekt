@@ -1,0 +1,63 @@
+.add-video-container {
+  padding: 24px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.header-card,
+.steps-card {
+  margin-bottom: 24px;
+}
+
+.title-no-margin {
+  margin: 0;
+}
+
+.preview-thumbnail-wrapper {
+  position: relative;
+  margin-bottom: 16px;
+}
+
+.preview-thumbnail-overlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 48px;
+  color: rgba(255, 255, 255, 0.8);
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.preview-alert {
+  margin-top: 16px;
+}
+
+.preview-placeholder {
+  text-align: center;
+  padding: 40px 20px;
+}
+
+.preview-icon {
+  font-size: 64px;
+  color: #d9d9d9;
+  margin-bottom: 16px;
+}
+
+.success-card {
+  margin-top: 24px;
+  text-align: center;
+}
+
+.success-icon {
+  font-size: 64px;
+  color: #52c41a;
+  margin-bottom: 16px;
+}
+
+.success-title {
+  color: #52c41a;
+}
+
+.tips-card {
+  margin-top: 16px;
+}
