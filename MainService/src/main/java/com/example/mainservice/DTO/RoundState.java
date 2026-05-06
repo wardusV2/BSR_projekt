@@ -76,16 +76,26 @@ public class RoundState {
      * Czy runda powinna zostać zakończona teraz?
      *
      * Warunki (sprawdzane w kolejności):
-     * 1. Zebrano głosy od wszystkich TOTAL_NODES węzłów.
-     * 2. Zebrano MIN_VOTES_FOR_EARLY_WBFT głosów (kworum "miękkie").
-     * 3. Minął ROUND_TIMEOUT_MS od startu.
+     * 1. Zebrano głosy od wszystkich TOTAL_NODES węzłów → natychmiastowe WBFT.
+     * 2. Minął ROUND_TIMEOUT_MS od startu → WBFT na zebranych głosach
+     *    (o ile mamy MIN_VOTES_FOR_EARLY_WBFT, inaczej NO_DATA).
+     *
+     * Celowo NIE uruchamiamy WBFT po samym fakcie zebrania MIN_VOTES_FOR_EARLY_WBFT —
+     * brakujące serwisy mogą być po prostu wolniejsze, nie wadliwe.
+     * Miękkie kworum stosujemy tylko jako fallback po upływie timeoutu.
      */
     public boolean shouldFinish() {
         if (finished) return false;
-        int count = votes.size();
-        if (count >= TOTAL_NODES) return true;
-        if (count >= MIN_VOTES_FOR_EARLY_WBFT) return true;
+        if (votes.size() >= TOTAL_NODES) return true;
         return isTimedOut();
+    }
+
+    /**
+     * Czy po timeoucie mamy wystarczająco głosów żeby uruchomić WBFT?
+     * Jeśli nie — scheduler zwróci NO_DATA zamiast uruchamiać algorytm.
+     */
+    public boolean hasEnoughVotesForWbft() {
+        return votes.size() >= MIN_VOTES_FOR_EARLY_WBFT;
     }
 
     /** Czy runda przekroczyła maksymalny czas oczekiwania? */

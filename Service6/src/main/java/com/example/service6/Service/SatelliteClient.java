@@ -155,7 +155,7 @@ public class SatelliteClient {
                 logger.error("{} błąd w pętli", serviceName, e);
             }
 
-        }, 15, 20, TimeUnit.SECONDS);
+        }, 5, 30, TimeUnit.SECONDS);
     }
 
     /* =========================================================

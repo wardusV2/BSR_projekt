@@ -2,12 +2,9 @@ package com.example.mainservice.Service;
 
 import com.example.mainservice.DTO.RoundState;
 import com.example.mainservice.DTO.ServiceMessage;
-import com.example.mainservice.DTO.UserCategoryPayload;
 import com.example.mainservice.DTO.WbftResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.annotation.Lazy;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -110,11 +107,23 @@ public class VoteAggregatorService {
         if (activeRounds.isEmpty()) return;
 
         activeRounds.forEach((userId, round) -> {
-            if (!round.isFinished() && round.isTimedOut()) {
-                int count = round.getVoteCount();
-                log.warn("TIMEOUT rundy dla userId={} po {} ms — zebrano {}/{} głosów",
-                        userId, round.ageMs(), count, RoundState.TOTAL_NODES);
+            if (round.isFinished() || !round.isTimedOut()) return;
+
+            int count = round.getVoteCount();
+            log.warn("TIMEOUT rundy dla userId={} po {} ms — zebrano {}/{} głosów",
+                    userId, round.ageMs(), count, RoundState.TOTAL_NODES);
+
+            if (round.hasEnoughVotesForWbft()) {
+                // Mamy ≥5 głosów — uruchom WBFT na tym co jest
+                log.info("Wystarczająca liczba głosów ({}) — uruchamiam WBFT po timeout", count);
                 runWbft(userId, round);
+            } else {
+                // Za mało głosów żeby cokolwiek sensownego policzyć
+                log.warn("Za mało głosów ({}/{}) — runda zakończona jako NO_DATA",
+                        count, RoundState.TOTAL_NODES);
+                round.markFinished();
+                activeRounds.remove(userId, round);
+                wbftResultService.addResult(buildNoDataResult(userId, round));
             }
         });
     }
@@ -244,6 +253,50 @@ public class VoteAggregatorService {
             return cat instanceof String s ? s : null;
         }
         return null;
+    }
+
+    private Map<String, Object> buildNoDataResult(int userId, RoundState round) {
+        List<String> missing = round.missingSenders(ALL_SERVICES);
+        List<Map<String, Object>> nodeVotes = new ArrayList<>();
+        round.getVotes().forEach((svc, msg) -> nodeVotes.add(Map.of(
+                "service",  svc,
+                "category", extractCategory(msg) != null ? extractCategory(msg) : "?",
+                "weight",   msg.getWeight(),
+                "state",    "ok",
+                "timedOut", false
+        )));
+        missing.forEach(svc -> nodeVotes.add(Map.of(
+                "service",  svc,
+                "category", "",
+                "weight",   0.0,
+                "state",    "missing",
+                "timedOut", true
+        )));
+        nodeVotes.sort(Comparator.comparing(m -> (String) m.get("service")));
+
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("userId",            userId);
+        map.put("category",          "OTHER");
+        map.put("status",            "NO_DATA");
+        map.put("winnerRatio",       0.0);
+        map.put("totalWeight",       0.0);
+        map.put("weightSums",        Map.of());
+        map.put("byzantineSuspects", List.of());
+        map.put("voterCount",        round.getVoteCount());
+        map.put("confident",         false);
+        map.put("timedOut",          true);
+        map.put("missingSenders",    missing);
+        map.put("nodeVotes",         nodeVotes);
+        map.put("timestamp",         System.currentTimeMillis());
+
+        logService.log(Map.of(
+                "type",      "WBFT",
+                "service",   "MainService",
+                "timestamp", System.currentTimeMillis(),
+                "content",   Map.of("userId", userId, "status", "NO_DATA",
+                        "category", "OTHER", "timedOut", true, "missing", missing)
+        ));
+        return map;
     }
 
     /* ══════════════════════════════════════════════════════════════

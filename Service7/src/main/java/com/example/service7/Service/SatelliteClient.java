@@ -180,7 +180,7 @@ public class SatelliteClient {
                 logger.error("Service7 loop error", e);
             }
 
-        }, 15, 40, TimeUnit.SECONDS);
+        }, 5, 40, TimeUnit.SECONDS);
     }
 
     /* =========================================================
