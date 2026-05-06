@@ -1,14 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="CompilerConfiguration">
+    <annotationProcessing>
+      <profile default="true" name="Default" enabled="true" />
+    </annotationProcessing>
     <bytecodeTargetLevel>
-      <module name="MainService" target="17" />
-      <module name="safelogin" target="21" />
-      <module name="Service1" target="17" />
       <module name="Service1 (1)" target="17" />
-      <module name="Service2" target="17" />
       <module name="Service2 (1)" target="17" />
-      <module name="Service3" target="17" />
       <module name="Service3 (1)" target="17" />
       <module name="Service3 (2)" target="17" />
     </bytecodeTargetLevel>

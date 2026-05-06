@@ -14,54 +14,44 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Agreguje głosy satelit i uruchamia algorytm WBFT.
  *
- * Trzy ścieżki zakończenia rundy:
- * ────────────────────────────────
- * A) Pełna liczba głosów (7/7)  → natychmiastowe WBFT w wątku VoteListener.
- * B) Kworum miękkie (≥5 głosów) → natychmiastowe WBFT (bez czekania na resztę).
- * C) Timeout (>30 s)            → WBFT uruchamiany przez @Scheduled co 5 s.
+ * Zmiany względem oryginału (warstwa security):
+ * ──────────────────────────────────────────────
+ * 1. Każda runda ma unikalny roundId (format: "u{userId}-{UUID}").
+ *    roundId jest przekazywany do WbftAlgorithm.compute() i służy do:
+ *    - śledzenia zużytych głosów (anty-replay)
+ *    - wykrywania equivocation (dwa głosy tej samej satelity w jednej rundzie)
  *
- * Flaga RoundState.finished (volatile) gwarantuje, że WBFT wykona się
- * dokładnie raz nawet przy współbieżnych wywołaniach.
+ * 2. Po zakończeniu rundy wywołuje wbftAlgorithm.clearRoundState(roundId)
+ *    aby zwolnić pamięć zajmowaną przez dane anty-replay.
+ *
+ * Pozostała logika (ścieżki A/B/C, timeout, @Scheduled) bez zmian.
  */
 @Service
 public class VoteAggregatorService {
 
     private static final Logger log = LoggerFactory.getLogger(VoteAggregatorService.class);
 
-    /** Wszystkie znane serwisy satelitarne. */
     private static final List<String> ALL_SERVICES = List.of(
             "Service1","Service2","Service3","Service4","Service5","Service6","Service7"
     );
-
-    /* ── zależności ── */
 
     private final WbftAlgorithm      wbftAlgorithm;
     private final WbftResultService  wbftResultService;
     private final MonitoringLogService logService;
 
-    /* ── stan aktywnych rund ── */
-
-    /**
-     * Mapa: userId → RoundState.
-     * ConcurrentHashMap chroni przed race-condition przy równoległych głosach.
-     */
+    /** userId → RoundState (zawiera roundId). */
     private final Map<Integer, RoundState> activeRounds = new ConcurrentHashMap<>();
 
     public VoteAggregatorService(WbftAlgorithm wbftAlgorithm,
                                  WbftResultService wbftResultService,
                                  MonitoringLogService logService) {
-        this.wbftAlgorithm     = wbftAlgorithm;
+        this.wbftAlgorithm    = wbftAlgorithm;
         this.wbftResultService = wbftResultService;
         this.logService        = logService;
     }
 
-    /* ══════════════════════════════════════════════════════════════
-       PRZYJMOWANIE GŁOSU
-       ══════════════════════════════════════════════════════════════ */
+    // ── Przyjmowanie głosu ────────────────────────────────────────────────────
 
-    /**
-     * Główny punkt wejścia — wywoływany przez VoteListener przy każdej wiadomości z RabbitMQ.
-     */
     public void processVote(ServiceMessage message) {
         Object rawUserId = extractUserId(message);
         if (rawUserId == null) {
@@ -70,38 +60,27 @@ public class VoteAggregatorService {
         }
         int userId = ((Number) rawUserId).intValue();
 
-        // Pobierz istniejącą rundę lub utwórz nową
         RoundState round = activeRounds.computeIfAbsent(userId, RoundState::new);
 
         if (round.isFinished()) {
-            // Runda już zamknięta — nowy głos zaczyna kolejną rundę
             round = new RoundState(userId);
             activeRounds.put(userId, round);
-            log.info("Nowa runda dla userId={} (poprzednia zamknięta)", userId);
+            log.info("Nowa runda {} dla userId={}", round.getRoundId(), userId);
         }
 
         round.addVote(message.getServiceName(), message);
 
-        log.info("Głos od {} dla userId={} ({}/{} głosów)",
+        log.info("Głos od {} dla userId={} ({}/{}) runda={}",
                 message.getServiceName(), userId,
-                round.getVoteCount(), RoundState.TOTAL_NODES);
+                round.getVoteCount(), RoundState.TOTAL_NODES, round.getRoundId());
 
-        // Sprawdź czy uruchomić WBFT natychmiast
         if (round.shouldFinish()) {
             runWbft(userId, round);
         }
     }
 
-    /* ══════════════════════════════════════════════════════════════
-       SCHEDULER — TIMEOUT
-       ══════════════════════════════════════════════════════════════ */
+    // ── Scheduler ─────────────────────────────────────────────────────────────
 
-    /**
-     * Co 5 sekund sprawdza, czy jakaś aktywna runda przekroczyła timeout.
-     * Jeśli tak — uruchamia WBFT na zebranych dotąd głosach.
-     *
-     * Wymaga @EnableScheduling w klasie konfiguracyjnej lub main.
-     */
     @Scheduled(fixedDelay = 5_000)
     public void checkTimeouts() {
         if (activeRounds.isEmpty()) return;
@@ -110,106 +89,85 @@ public class VoteAggregatorService {
             if (round.isFinished() || !round.isTimedOut()) return;
 
             int count = round.getVoteCount();
-            log.warn("TIMEOUT rundy dla userId={} po {} ms — zebrano {}/{} głosów",
-                    userId, round.ageMs(), count, RoundState.TOTAL_NODES);
+            log.warn("TIMEOUT rundy {} dla userId={} po {}ms — {}/{} głosów",
+                    round.getRoundId(), userId, round.ageMs(), count, RoundState.TOTAL_NODES);
 
             if (round.hasEnoughVotesForWbft()) {
-                // Mamy ≥5 głosów — uruchom WBFT na tym co jest
-                log.info("Wystarczająca liczba głosów ({}) — uruchamiam WBFT po timeout", count);
                 runWbft(userId, round);
             } else {
-                // Za mało głosów żeby cokolwiek sensownego policzyć
-                log.warn("Za mało głosów ({}/{}) — runda zakończona jako NO_DATA",
-                        count, RoundState.TOTAL_NODES);
+                log.warn("Za mało głosów ({}/{}) — NO_DATA", count, RoundState.TOTAL_NODES);
                 round.markFinished();
                 activeRounds.remove(userId, round);
+                // Wyczyść stan anty-replay dla tej rundy
+                wbftAlgorithm.clearRoundState(round.getRoundId());
                 wbftResultService.addResult(buildNoDataResult(userId, round));
             }
         });
     }
 
-    /* ══════════════════════════════════════════════════════════════
-       URUCHOMIENIE WBFT
-       ══════════════════════════════════════════════════════════════ */
+    // ── Uruchomienie WBFT ─────────────────────────────────────────────────────
 
-    /**
-     * Uruchamia algorytm WBFT dla danej rundy.
-     * Metoda jest idempotentna dzięki RoundState.markFinished().
-     */
     private void runWbft(int userId, RoundState round) {
-        // Atomowe oznaczenie rundy jako zakończonej
         if (!round.markFinished()) {
-            log.debug("WBFT dla userId={} już uruchomiony — pomijam", userId);
+            log.debug("WBFT dla userId={} już uruchomiony – pomijam", userId);
             return;
         }
 
-        // Usunięcie z mapy aktywnych rund
         activeRounds.remove(userId, round);
 
-        List<String> missing = round.missingSenders(ALL_SERVICES);
+        List<String> missing  = round.missingSenders(ALL_SERVICES);
         boolean timedOut = round.isTimedOut() && round.getVoteCount() < RoundState.TOTAL_NODES;
+        String roundId   = round.getRoundId();
 
-        log.info("Uruchamiam WBFT dla userId={} | głosy={}/{} | timeout={} | brakuje={}",
-                userId, round.getVoteCount(), RoundState.TOTAL_NODES, timedOut, missing);
+        log.info("Uruchamiam WBFT | runda={} userId={} głosy={}/{} timeout={} brakuje={}",
+                roundId, userId, round.getVoteCount(), RoundState.TOTAL_NODES, timedOut, missing);
 
-        // Oblicz wynik WBFT
-        WbftResult result = wbftAlgorithm.compute(round.getVotes());
+        // Przekaż roundId do WBFT – używany do weryfikacji anty-replay i equivocation
+        WbftResult result = wbftAlgorithm.compute(roundId, round.getVotes());
 
-        // Wzbogać wynik o metadane rundy
+        // Zwolnij pamięć anty-replay po zakończeniu rundy
+        wbftAlgorithm.clearRoundState(roundId);
+
         Map<String, Object> resultMap = buildResultMap(userId, result, round, missing, timedOut);
-
-        // Zapisz wynik
         wbftResultService.addResult(resultMap);
 
-        // Log monitoringu
         logService.log(Map.of(
                 "type",      "WBFT",
                 "service",   "MainService",
                 "timestamp", System.currentTimeMillis(),
                 "content",   Map.of(
-                        "userId",   userId,
-                        "status",   result.getStatus().name(),
-                        "category", result.getCategory(),
-                        "timedOut", timedOut,
-                        "missing",  missing
+                        "userId",    userId,
+                        "roundId",   roundId,
+                        "status",    result.getStatus().name(),
+                        "category",  result.getCategory(),
+                        "timedOut",  timedOut,
+                        "missing",   missing,
+                        "blacklist", wbftAlgorithm.getBlacklist()
                 )
         ));
 
-        log.info("WBFT zakończony dla userId={} → status={} kategoria={}",
-                userId, result.getStatus(), result.getCategory());
+        log.info("WBFT zakończony | runda={} userId={} status={} kategoria={}",
+                roundId, userId, result.getStatus(), result.getCategory());
     }
 
-    /* ══════════════════════════════════════════════════════════════
-       BUDOWANIE ODPOWIEDZI
-       ══════════════════════════════════════════════════════════════ */
+    // ── Budowanie odpowiedzi ──────────────────────────────────────────────────
 
-    /**
-     * Buduje mapę wynikową przekazywaną do WbftResultService i frontendu.
-     * Zawiera pole nodeVotes potrzebne do wizualizacji węzłów.
-     */
-    private Map<String, Object> buildResultMap(int userId,
-                                               WbftResult result,
-                                               RoundState round,
-                                               List<String> missing,
+    private Map<String, Object> buildResultMap(int userId, WbftResult result,
+                                               RoundState round, List<String> missing,
                                                boolean timedOut) {
-        // Wyznacz kategorię zwycięzcy do porównania z głosami
-        String winnerCategory = result.getCategory();
-
-        // Zbuduj listę głosów per węzeł (dla frontendu)
         List<Map<String, Object>> nodeVotes = new ArrayList<>();
         round.getVotes().forEach((svc, msg) -> {
             String cat = extractCategory(msg);
             boolean isByzantine = result.getByzantineSuspects().contains(svc);
             nodeVotes.add(Map.of(
-                    "service",   svc,
-                    "category",  cat != null ? cat : "?",
-                    "weight",    msg.getWeight(),
-                    "state",     isByzantine ? "byzantine" : "ok",
-                    "timedOut",  false
+                    "service",  svc,
+                    "category", cat != null ? cat : "?",
+                    "weight",   msg.getWeight(),
+                    "state",    isByzantine ? "byzantine" : "ok",
+                    "timedOut", false
             ));
         });
 
-        // Dodaj węzły, które nie odpowiedziały
         missing.forEach(svc -> nodeVotes.add(Map.of(
                 "service",  svc,
                 "category", "",
@@ -218,11 +176,11 @@ public class VoteAggregatorService {
                 "timedOut", timedOut
         )));
 
-        // Sortuj: Service1…Service7
         nodeVotes.sort(Comparator.comparing(m -> (String) m.get("service")));
 
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("userId",            userId);
+        map.put("roundId",           round.getRoundId());
         map.put("category",          result.getCategory());
         map.put("status",            result.getStatus().name());
         map.put("winnerRatio",       result.getWinnerRatio());
@@ -238,9 +196,7 @@ public class VoteAggregatorService {
         return map;
     }
 
-    /* ══════════════════════════════════════════════════════════════
-       EKSTRAKCJA DANYCH
-       ══════════════════════════════════════════════════════════════ */
+    // ── Ekstrakcja ────────────────────────────────────────────────────────────
 
     private Object extractUserId(ServiceMessage msg) {
         if (msg.getContent() instanceof Map<?, ?> m) return m.get("userId");
@@ -258,6 +214,7 @@ public class VoteAggregatorService {
     private Map<String, Object> buildNoDataResult(int userId, RoundState round) {
         List<String> missing = round.missingSenders(ALL_SERVICES);
         List<Map<String, Object>> nodeVotes = new ArrayList<>();
+
         round.getVotes().forEach((svc, msg) -> nodeVotes.add(Map.of(
                 "service",  svc,
                 "category", extractCategory(msg) != null ? extractCategory(msg) : "?",
@@ -276,6 +233,7 @@ public class VoteAggregatorService {
 
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("userId",            userId);
+        map.put("roundId",           round.getRoundId());
         map.put("category",          "OTHER");
         map.put("status",            "NO_DATA");
         map.put("winnerRatio",       0.0);
@@ -293,39 +251,37 @@ public class VoteAggregatorService {
                 "type",      "WBFT",
                 "service",   "MainService",
                 "timestamp", System.currentTimeMillis(),
-                "content",   Map.of("userId", userId, "status", "NO_DATA",
-                        "category", "OTHER", "timedOut", true, "missing", missing)
+                "content",   Map.of("userId", userId, "roundId", round.getRoundId(),
+                        "status", "NO_DATA", "category", "OTHER",
+                        "timedOut", true, "missing", missing)
         ));
         return map;
     }
 
-    /* ══════════════════════════════════════════════════════════════
-       DIAGNOSTYKA
-       ══════════════════════════════════════════════════════════════ */
+    // ── Diagnostyka ───────────────────────────────────────────────────────────
 
-    /**
-     * Stan aktywnych rund — używany przez MonitoringController (/monitor/state).
-     */
     public Map<String, Object> getDebugState() {
         Map<String, Object> state = new LinkedHashMap<>();
-
         Map<String, Object> users = new LinkedHashMap<>();
+
         activeRounds.forEach((userId, round) -> {
             Map<String, Object> info = new LinkedHashMap<>();
-            info.put("voteCount",   round.getVoteCount());
-            info.put("totalNodes",  RoundState.TOTAL_NODES);
-            info.put("ageMs",       round.ageMs());
-            info.put("timedOut",    round.isTimedOut());
-            info.put("missing",     round.missingSenders(ALL_SERVICES));
-            info.put("senders",     new ArrayList<>(round.getVotes().keySet()));
+            info.put("roundId",    round.getRoundId());
+            info.put("voteCount",  round.getVoteCount());
+            info.put("totalNodes", RoundState.TOTAL_NODES);
+            info.put("ageMs",      round.ageMs());
+            info.put("timedOut",   round.isTimedOut());
+            info.put("missing",    round.missingSenders(ALL_SERVICES));
+            info.put("senders",    new ArrayList<>(round.getVotes().keySet()));
             users.put(String.valueOf(userId), info);
         });
 
-        state.put("activeUsers",   users);
-        state.put("totalRounds",   users.size());
-        state.put("timeoutMs",     RoundState.ROUND_TIMEOUT_MS);
-        state.put("minVotes",      RoundState.MIN_VOTES_FOR_EARLY_WBFT);
-        state.put("serverTimeMs",  System.currentTimeMillis());
+        state.put("activeUsers",      users);
+        state.put("totalRounds",      users.size());
+        state.put("timeoutMs",        RoundState.ROUND_TIMEOUT_MS);
+        state.put("minVotes",         RoundState.MIN_VOTES_FOR_EARLY_WBFT);
+        state.put("blacklistedNodes", wbftAlgorithm.getBlacklist());
+        state.put("serverTimeMs",     System.currentTimeMillis());
         return state;
     }
 }

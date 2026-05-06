@@ -1,105 +1,179 @@
 package com.example.mainservice.Service;
 
 import com.example.mainservice.DTO.ServiceMessage;
-import com.example.mainservice.DTO.UserCategoryPayload;
 import com.example.mainservice.DTO.WbftResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
+import java.security.*;
+import java.security.spec.X509EncodedKeySpec;
+import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import java.util.Base64;
 
 /**
- * Implementacja algorytmu Weighted Byzantine Fault Tolerance (WBFT).
+ * Secure Weighted Byzantine Fault Tolerance (WBFT).
  *
- * Zasada działania:
- * ─────────────────
- * 1. Każdy węzeł (satelita) wysyła głos: (kategoria, waga).
- * 2. Sumujemy wagi per kategoria.
- * 3. Zwycięzca musi uzyskać > QUORUM_THRESHOLD sumy wszystkich wag.
- *    Domyślnie 2/3 (66.6%) – klasyczny próg BFT tolerujący f < n/3 błędów.
- * 4. Węzły, których głos różni się od kategorii uzyskującej kworum,
- *    są oznaczane jako "byzantine suspects".
- * 5. Jeśli żadna kategoria nie osiągnie progu → wynik NO_QUORUM ("OTHER").
+ * Warstwa bezpieczeństwa (nowa względem oryginału):
+ * ──────────────────────────────────────────────────
+ * 1. ECDSA (SHA256withECDSA / secp256r1)
+ *    Każdy głos musi być podpisany kluczem prywatnym satelity.
+ *    Weryfikacja odbywa się kluczem publicznym z TrustStore.
+ *    Nieważny podpis = kryptograficzny dowód złośliwości → czarna lista.
  *
- * Tolerancja błędów:
- * ──────────────────
- * Przy 7 węzłach i równych wagach system toleruje do 2 węzłów byzantyjskich
- * (f < n/3 = 2.33 → f_max = 2).
- * Przy różnych wagach kryterium opiera się na sumie wag, nie liczbie węzłów.
+ * 2. TrustStore
+ *    Rejestr kluczy publicznych satelit. Tylko węzły zarejestrowane
+ *    mogą uczestniczyć w głosowaniu. Klucze ładowane przy starcie
+ *    przez NodeKeyRegistry (@PostConstruct) z pliku konfiguracyjnego.
+ *
+ * 3. Ochrona przed Replay Attack
+ *    - timestamp: głos odrzucany jeśli starszy niż MAX_VOTE_AGE_MS (30 s).
+ *    - para (roundId, serviceName): zapamiętywana jako "zużyta".
+ *      Ponowne użycie → odrzucenie.
+ *
+ * 4. Wykrywanie Equivocation
+ *    Jeśli satelita wyśle dwa różne głosy w tej samej rundzie
+ *    → PROVEN_BYZANTINE → czarna lista.
+ *
+ * 5. Statystyczna detekcja anomalii (z oryginału)
+ *    Pozostaje jako drugorzędny mechanizm dla węzłów "podejrzanych"
+ *    (brak dowodu kryptograficznego, tylko odchylenie statystyczne).
+ *
+ * Interfejs publiczny:
+ * ────────────────────
+ * compute(roundId, votes) – przyjmuje roundId generowane przez
+ * VoteAggregatorService (UUID per użytkownik per runda).
+ *
+ * Kompatybilność wsteczna:
+ * ────────────────────────
+ * compute(votes) – stara sygnatura, generuje roundId wewnętrznie.
+ * Nie zapewnia pełnej ochrony przed Replay Attack między rundami.
  */
-
 @Component
 public class WbftAlgorithm {
+
     private static final Logger logger = LoggerFactory.getLogger(WbftAlgorithm.class);
 
-    /**
-     * Próg kworum: zwycięzca musi mieć > 2/3 sumy wszystkich wag.
-     * Klasyczny BFT wymaga 2f+1 z 3f+1 węzłów → ~66.7%.
-     */
-    private static final double QUORUM_THRESHOLD = 2.0 / 3.0;
-
-    /**
-     * Minimalna różnica względna między 1. a 2. kategorią
-     * wymagana do uznania wyniku za pewny (dodatkowe zabezpieczenie).
-     */
+    private static final double QUORUM_THRESHOLD  = 2.0 / 3.0;
     private static final double MIN_RELATIVE_DIFF = 0.10;
+    private static final long   MAX_VOTE_AGE_MS   = 30_000L;
+    private static final String SIG_ALGORITHM     = "SHA256withECDSA";
 
-    /* ================================================================
-       GŁÓWNA METODA
-       ================================================================ */
+    // ── TrustStore ────────────────────────────────────────────────────────────
+
+    /** serviceName → PublicKey. Ładowany przez NodeKeyRegistry przy starcie. */
+    private final Map<String, PublicKey> trustStore = new ConcurrentHashMap<>();
+
+    /** Satelity z udowodnioną złośliwością – trwale wykluczone. */
+    private final Set<String> blacklist = ConcurrentHashMap.newKeySet();
+
+    /** roundId → Set<serviceName>: zużyte pary (anty-replay). */
+    private final Map<String, Set<String>> usedVotes = new ConcurrentHashMap<>();
+
+    /** roundId → Map<serviceName, category>: pierwszy głos per satelita per runda. */
+    private final Map<String, Map<String, String>> firstVotes = new ConcurrentHashMap<>();
+
+    // ── Rejestracja kluczy publicznych ───────────────────────────────────────
 
     /**
-     * Uruchamia algorytm WBFT dla zebranych głosów jednego użytkownika.
+     * Rejestruje klucz publiczny satelity w TrustStore.
+     * Wywoływane przez NodeKeyRegistry przy starcie aplikacji.
      *
-     * @param votes mapa: serviceName → ServiceMessage (głos satelity)
-     * @return wynik rundy WBFT
+     * @param serviceName  np. "Service1"
+     * @param publicKeyB64 klucz publiczny ECDSA zakodowany w Base64 (X.509 DER)
      */
-    public WbftResult compute(Map<String, ServiceMessage> votes) {
+    public void registerNode(String serviceName, String publicKeyB64)
+            throws GeneralSecurityException {
+        byte[] keyBytes = Base64.getDecoder().decode(publicKeyB64);
+        KeyFactory kf = KeyFactory.getInstance("EC");
+        PublicKey pk = kf.generatePublic(new X509EncodedKeySpec(keyBytes));
+        trustStore.put(serviceName, pk);
+        logger.info("TrustStore: zarejestrowano satelitę '{}'", serviceName);
+    }
+
+    /** Bezpośrednia rejestracja obiektu PublicKey (używana w testach). */
+    public void registerNode(String serviceName, PublicKey publicKey) {
+        trustStore.put(serviceName, publicKey);
+        logger.info("TrustStore: zarejestrowano satelitę '{}' (obiekt)", serviceName);
+    }
+
+    // ── Publiczny interfejs ───────────────────────────────────────────────────
+
+    /**
+     * Główna metoda – wywoływana przez VoteAggregatorService.
+     *
+     * @param roundId unikalny identyfikator rundy (np. "userId-42-" + UUID)
+     * @param votes   mapa: serviceName → ServiceMessage
+     */
+    public WbftResult compute(String roundId, Map<String, ServiceMessage> votes) {
 
         if (votes == null || votes.isEmpty()) {
-            logger.warn("WBFT: brak głosów");
+            logger.warn("WBFT [{}]: brak głosów", roundId);
             return noData();
         }
 
-        // ── 1. Ekstrakcja głosów ────────────────────────────────────
-        Map<String, String> serviceToCategory = extractCategories(votes);
-        Map<String, Double> serviceToWeight   = extractWeights(votes);
+        // ── 1. Walidacja kryptograficzna każdego głosu ───────────────────────
+        Map<String, String> verifiedCategories = new HashMap<>();
+        Map<String, Double> verifiedWeights    = new HashMap<>();
+        List<String>        cryptoByzantine    = new ArrayList<>();
 
-        if (serviceToCategory.isEmpty()) {
-            logger.warn("WBFT: nie udało się wyekstrahować żadnej kategorii");
+        for (Map.Entry<String, ServiceMessage> entry : votes.entrySet()) {
+            String serviceName = entry.getKey();
+            ServiceMessage msg = entry.getValue();
+
+            ValidationResult vr = validateVote(roundId, serviceName, msg);
+
+            switch (vr) {
+                case BLACKLISTED -> logger.warn(
+                        "WBFT [{}]: {} na czarnej liście – odrzucono", roundId, serviceName);
+
+                case INVALID_SIGNATURE, REPLAY_DETECTED, EQUIVOCATION, STALE_VOTE -> {
+                    logger.error("WBFT [{}]: {} → {} → czarna lista",
+                            roundId, serviceName, vr);
+                    blacklist.add(serviceName);
+                    cryptoByzantine.add(serviceName);
+                }
+                case UNKNOWN_NODE -> logger.warn(
+                        "WBFT [{}]: {} nieznany (brak klucza publicznego) – odrzucono",
+                        roundId, serviceName);
+
+                case VALID -> {
+                    String cat = extractCategory(msg);
+                    if (cat != null) {
+                        verifiedCategories.put(serviceName, cat);
+                        verifiedWeights.put(serviceName, msg.getWeight());
+                    }
+                }
+            }
+        }
+
+        if (verifiedCategories.isEmpty()) {
+            logger.warn("WBFT [{}]: brak zweryfikowanych głosów", roundId);
             return noData();
         }
 
-        // ── 2. Sumowanie wag per kategoria ──────────────────────────
+        // ── 2. Sumowanie wag per kategoria ───────────────────────────────────
         Map<String, Double> weightSums = new HashMap<>();
-        serviceToCategory.forEach((service, category) ->
-                weightSums.merge(category, serviceToWeight.getOrDefault(service, 1.0), Double::sum)
-        );
+        verifiedCategories.forEach((svc, cat) ->
+                weightSums.merge(cat, verifiedWeights.getOrDefault(svc, 1.0), Double::sum));
 
-        double totalWeight = weightSums.values().stream()
-                .mapToDouble(Double::doubleValue).sum();
+        double totalWeight = weightSums.values().stream().mapToDouble(Double::doubleValue).sum();
+        logWeightSums(roundId, weightSums, totalWeight);
 
-        logWeightSums(weightSums, totalWeight);
-
-        // ── 3. Przypadek: wszyscy zgodni ────────────────────────────
+        // ── 3. Wszyscy zgodni ────────────────────────────────────────────────
         if (weightSums.size() == 1) {
             String winner = weightSums.keySet().iterator().next();
-            logger.info("WBFT: UNANIMOUS → kategoria={}", winner);
-            return new WbftResult(
-                    winner,
-                    WbftResult.Status.UNANIMOUS,
-                    weightSums,
-                    totalWeight,
-                    totalWeight,
-                    1.0,
-                    List.of(),
-                    serviceToCategory.size()
-            );
+            logger.info("WBFT [{}]: UNANIMOUS → {}", roundId, winner);
+            return new WbftResult(winner, WbftResult.Status.UNANIMOUS,
+                    weightSums, totalWeight, totalWeight, 1.0,
+                    cryptoByzantine, verifiedCategories.size());
         }
 
-        // ── 4. Sortowanie kandydatów malejąco po wadze ──────────────
+        // ── 4. Ranking ───────────────────────────────────────────────────────
         List<Map.Entry<String, Double>> ranked = weightSums.entrySet().stream()
                 .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
                 .toList();
@@ -107,134 +181,179 @@ public class WbftAlgorithm {
         String winner       = ranked.get(0).getKey();
         double winnerWeight = ranked.get(0).getValue();
         double secondWeight = ranked.get(1).getValue();
+        double winnerRatio  = winnerWeight / totalWeight;
+        double relativeDiff = (winnerWeight - secondWeight) / totalWeight;
 
-        double winnerRatio   = winnerWeight / totalWeight;
-        double relativeDiff  = (winnerWeight - secondWeight) / totalWeight;
+        // ── 5. Statystyczna detekcja podejrzanych ────────────────────────────
+        List<String> suspects = detectStatisticalSuspects(
+                verifiedCategories, winner, verifiedWeights, totalWeight);
 
-        logger.info("WBFT: kandydat={} waga={:.2f} ratio={:.2f} diff={:.2f}",
-                winner, winnerWeight, winnerRatio, relativeDiff);
+        // Połącz: kryptograficznie udowodnieni + statystyczni
+        List<String> allSuspects = new ArrayList<>(cryptoByzantine);
+        suspects.stream().filter(s -> !allSuspects.contains(s)).forEach(allSuspects::add);
 
-        // ── 5. Wykrywanie węzłów byzantyjskich ──────────────────────
-        List<String> byzantineSuspects = detectByzantineNodes(
-                serviceToCategory, winner, serviceToWeight, totalWeight
-        );
-
-        if (!byzantineSuspects.isEmpty()) {
-            logger.warn("WBFT: podejrzane węzły byzantyjskie → {}", byzantineSuspects);
-        }
-
-        // ── 6. Sprawdzenie kworum ────────────────────────────────────
+        // ── 6. Kworum ────────────────────────────────────────────────────────
         boolean hasQuorum = winnerRatio > QUORUM_THRESHOLD
                 && relativeDiff >= MIN_RELATIVE_DIFF;
 
         if (hasQuorum) {
-            logger.info("WBFT: CONSENSUS → kategoria={} ratio={:.1f}%",
-                    winner, winnerRatio * 100);
-            return new WbftResult(
-                    winner,
-                    WbftResult.Status.CONSENSUS,
-                    weightSums,
-                    totalWeight,
-                    winnerWeight,
-                    winnerRatio,
-                    byzantineSuspects,
-                    serviceToCategory.size()
-            );
+            logger.info("WBFT [{}]: CONSENSUS → {} ({:.1f}%)",
+                    roundId, winner, winnerRatio * 100);
+            return new WbftResult(winner, WbftResult.Status.CONSENSUS,
+                    weightSums, totalWeight, winnerWeight, winnerRatio,
+                    allSuspects, verifiedCategories.size());
         }
 
-        // ── 7. Brak kworum ───────────────────────────────────────────
-        logger.warn("WBFT: NO_QUORUM → najlepszy kandydat={} ratio={:.1f}% (próg={:.1f}%)",
-                winner, winnerRatio * 100, QUORUM_THRESHOLD * 100);
-        return new WbftResult(
-                "OTHER",
-                WbftResult.Status.NO_QUORUM,
-                weightSums,
-                totalWeight,
-                winnerWeight,
-                winnerRatio,
-                byzantineSuspects,
-                serviceToCategory.size()
-        );
+        logger.warn("WBFT [{}]: NO_QUORUM → {} ({:.1f}% < {:.1f}%)",
+                roundId, winner, winnerRatio * 100, QUORUM_THRESHOLD * 100);
+        return new WbftResult("OTHER", WbftResult.Status.NO_QUORUM,
+                weightSums, totalWeight, winnerWeight, winnerRatio,
+                allSuspects, verifiedCategories.size());
     }
 
-    /* ================================================================
-       WYKRYWANIE BŁĘDÓW BYZANTYJSKICH
-       ================================================================
-       Węzeł jest "podejrzany" gdy:
-       - głosuje na kategorię inną niż zwycięzca kworum
-       - ORAZ jego waga jest na tyle duża, że mógł celowo zablokować konsensus
-         (waga węzła > MIN_RELATIVE_DIFF * totalWeight)
-       ================================================================ */
+    /**
+     * Kompatybilność wsteczna z VoteAggregatorService (stara sygnatura).
+     * Generuje roundId wewnętrznie – nie zapewnia pełnej ochrony między rundami.
+     */
+    public WbftResult compute(Map<String, ServiceMessage> votes) {
+        return compute("round-" + UUID.randomUUID(), votes);
+    }
 
-    private List<String> detectByzantineNodes(
-            Map<String, String> serviceToCategory,
+    // ── Walidacja kryptograficzna ─────────────────────────────────────────────
+
+    private enum ValidationResult {
+        VALID,
+        UNKNOWN_NODE,       // brak klucza w TrustStore
+        BLACKLISTED,        // węzeł na czarnej liście
+        INVALID_SIGNATURE,  // podpis ECDSA nieważny → dowód złośliwości
+        REPLAY_DETECTED,    // para (roundId, serviceName) już zużyta
+        EQUIVOCATION,       // dwa różne głosy w tej samej rundzie
+        STALE_VOTE          // głos zbyt stary
+    }
+
+    private ValidationResult validateVote(String roundId, String serviceName, ServiceMessage msg) {
+
+        // 1. Czarna lista
+        if (blacklist.contains(serviceName))
+            return ValidationResult.BLACKLISTED;
+
+        // 2. TrustStore
+        PublicKey publicKey = trustStore.get(serviceName);
+        if (publicKey == null)
+            return ValidationResult.UNKNOWN_NODE;
+
+        // 3. Świeżość timestampu
+        long age = Math.abs(Instant.now().toEpochMilli() - msg.getTimestamp());
+        if (age > MAX_VOTE_AGE_MS) {
+            logger.warn("WBFT: stale vote od {} (wiek={}ms)", serviceName, age);
+            return ValidationResult.STALE_VOTE;
+        }
+
+        // 4. Replay: para (roundId, serviceName) już użyta?
+        Set<String> used = usedVotes.computeIfAbsent(roundId,
+                k -> ConcurrentHashMap.newKeySet());
+        if (!used.add(serviceName))
+            return ValidationResult.REPLAY_DETECTED;
+
+        // 5. Weryfikacja podpisu ECDSA
+        String payload = buildPayload(serviceName, msg);
+        if (!verifySignature(payload, msg.getSignature(), publicKey))
+            return ValidationResult.INVALID_SIGNATURE;
+
+        // 6. Equivocation: inny głos w tej samej rundzie?
+        String category = extractCategory(msg);
+        Map<String, String> roundFirst = firstVotes.computeIfAbsent(roundId,
+                k -> new ConcurrentHashMap<>());
+        String prev = roundFirst.putIfAbsent(serviceName, category != null ? category : "");
+        if (prev != null && !prev.equals(category)) {
+            logger.error("WBFT: EQUIVOCATION {} w rundzie {}: '{}' vs '{}'",
+                    serviceName, roundId, prev, category);
+            return ValidationResult.EQUIVOCATION;
+        }
+
+        return ValidationResult.VALID;
+    }
+
+    /**
+     * Buduje payload do podpisu.
+     * Musi być identyczny po stronie satelity i MainService.
+     * Format: serviceName|category|weight|timestamp
+     */
+    private String buildPayload(String serviceName, ServiceMessage msg) {
+        String category = extractCategory(msg);
+        return serviceName + "|" + category + "|" + msg.getWeight() + "|" + msg.getTimestamp();
+    }
+
+    private boolean verifySignature(String payload, String signature, PublicKey publicKey) {
+        if (signature == null || signature.isBlank()) {
+            logger.warn("WBFT: brak podpisu w głosie");
+            return false;
+        }
+        try {
+            Signature sig = Signature.getInstance(SIG_ALGORITHM);
+            sig.initVerify(publicKey);
+            sig.update(payload.getBytes(StandardCharsets.UTF_8));
+            return sig.verify(Base64.getDecoder().decode(signature));
+        } catch (Exception e) {
+            logger.error("WBFT: błąd weryfikacji podpisu: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    // ── Statystyczna detekcja ─────────────────────────────────────────────────
+
+    private List<String> detectStatisticalSuspects(
+            Map<String, String> verifiedCategories,
             String winnerCategory,
-            Map<String, Double> serviceToWeight,
+            Map<String, Double> weights,
             double totalWeight
     ) {
-        double byzantineWeightThreshold = MIN_RELATIVE_DIFF * totalWeight;
-
-        return serviceToCategory.entrySet().stream()
+        double threshold = MIN_RELATIVE_DIFF * totalWeight;
+        return verifiedCategories.entrySet().stream()
                 .filter(e -> !winnerCategory.equals(e.getValue()))
-                .filter(e -> {
-                    double w = serviceToWeight.getOrDefault(e.getKey(), 1.0);
-                    // węzeł z dużą wagą głosujący przeciwko – podejrzany
-                    return w >= byzantineWeightThreshold;
-                })
+                .filter(e -> weights.getOrDefault(e.getKey(), 1.0) >= threshold)
                 .map(Map.Entry::getKey)
                 .sorted()
                 .collect(Collectors.toList());
     }
 
-    /* ================================================================
-       EKSTRAKCJA
-       ================================================================ */
+    // ── Czyszczenie stanu rundy ───────────────────────────────────────────────
 
-    private Map<String, String> extractCategories(Map<String, ServiceMessage> votes) {
-        Map<String, String> result = new HashMap<>();
-        votes.forEach((service, msg) -> {
-            if (msg.getContent() instanceof Map<?, ?> map) {
-                Object cat = map.get("category");
-                if (cat instanceof String category && !category.isBlank()) {
-                    result.put(service, category);
-                }
-            }
-        });
-        return result;
+    /**
+     * Wywołaj po compute() aby zapobiec wyciekowi pamięci.
+     * VoteAggregatorService powinien wywoływać tę metodę w runWbft().
+     */
+    public void clearRoundState(String roundId) {
+        usedVotes.remove(roundId);
+        firstVotes.remove(roundId);
+        logger.debug("WBFT: wyczyszczono stan rundy {}", roundId);
     }
 
-    private Map<String, Double> extractWeights(Map<String, ServiceMessage> votes) {
-        Map<String, Double> result = new HashMap<>();
-        votes.forEach((service, msg) -> result.put(service, msg.getWeight()));
-        return result;
+    /** Niemodyfikowalny widok czarnej listy (do monitoringu). */
+    public Set<String> getBlacklist() {
+        return Collections.unmodifiableSet(blacklist);
     }
 
-    /* ================================================================
-       LOGGING
-       ================================================================ */
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private void logWeightSums(Map<String, Double> weightSums, double total) {
-        logger.info("WBFT: rozkład głosów (łącznie waga={:.2f}):", total);
-        weightSums.entrySet().stream()
+    private String extractCategory(ServiceMessage msg) {
+        if (msg.getContent() instanceof Map<?, ?> map) {
+            Object cat = map.get("category");
+            return cat instanceof String s && !s.isBlank() ? s : null;
+        }
+        return null;
+    }
+
+    private void logWeightSums(String roundId, Map<String, Double> ws, double total) {
+        logger.info("WBFT [{}]: rozkład głosów (łącznie={:.2f}):", roundId, total);
+        ws.entrySet().stream()
                 .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
                 .forEach(e -> logger.info("  {} → {:.2f} ({:.1f}%)",
                         e.getKey(), e.getValue(), e.getValue() / total * 100));
     }
 
-    /* ================================================================
-       FACTORY METHODS
-       ================================================================ */
-
     private WbftResult noData() {
-        return new WbftResult(
-                "OTHER",
-                WbftResult.Status.NO_DATA,
-                Map.of(),
-                0.0,
-                0.0,
-                0.0,
-                List.of(),
-                0
-        );
+        return new WbftResult("OTHER", WbftResult.Status.NO_DATA,
+                Map.of(), 0.0, 0.0, 0.0, List.of(), 0);
     }
 }
