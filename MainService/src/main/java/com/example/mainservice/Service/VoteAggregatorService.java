@@ -23,6 +23,7 @@ public class VoteAggregatorService {
     private static final Logger logger =
             LoggerFactory.getLogger(VoteAggregatorService.class);
 
+
     private static final Set<String> EXPECTED_SERVICES = Set.of(
             "Service1", "Service2", "Service3",
             "Service4", "Service5", "Service6", "Service7"
