@@ -40,15 +40,18 @@ public class VoteAggregatorService {
     private final WbftAlgorithm wbftAlgorithm;
     private final RecommendationClient recommendationClient;
     private final SimpMessagingTemplate wsTemplate;
+    private final WbftResultService wbftResultService;
 
     public VoteAggregatorService(
             WbftAlgorithm wbftAlgorithm,
             RecommendationClient recommendationClient,
-            @Lazy SimpMessagingTemplate wsTemplate
+            @Lazy SimpMessagingTemplate wsTemplate,
+            WbftResultService wbftResultService          // ← DODAJ
     ) {
         this.wbftAlgorithm        = wbftAlgorithm;
         this.recommendationClient = recommendationClient;
         this.wsTemplate           = wsTemplate;
+        this.wbftResultService    = wbftResultService;   // ← DODAJ
     }
 
     /* ================================================================
@@ -96,25 +99,31 @@ public class VoteAggregatorService {
        ================================================================ */
 
     private void runWbftForUser(Integer userId) {
-
         Map<String, ServiceMessage> votes = lastMessagesPerUser.get(userId);
 
-        logger.info("[WBFT] ══ Uruchamiam algorytm dla user={} ({} głosów) ══",
-                userId, votes.size());
-
         WbftResult result = wbftAlgorithm.compute(votes);
-
         logWbftResult(userId, result);
 
-        recommendationClient.saveRecommendation(userId, result.category());
+        // ── ZAPISZ WYNIK DO WbftResultService ─────────────────────
+        Map<String, Object> resultEntry = new java.util.HashMap<>();
+        resultEntry.put("userId",            userId);
+        resultEntry.put("category",          result.category());
+        resultEntry.put("status",            result.status().name());
+        resultEntry.put("winnerRatio",       result.winnerRatio());
+        resultEntry.put("totalWeight",       result.totalWeight());
+        resultEntry.put("weightSums",        result.weightSums());
+        resultEntry.put("byzantineSuspects", result.byzantineSuspects());
+        resultEntry.put("voterCount",        result.voterCount());
+        resultEntry.put("confident",         result.isConfident());
+        resultEntry.put("timestamp",         System.currentTimeMillis());
+        wbftResultService.save(resultEntry);
+        // ─────────────────────────────────────────────────────────
 
+        recommendationClient.saveRecommendation(userId, result.category());
         notifyFrontend(userId, result);
 
-        // Reset – gotowość na kolejną rundę
         lastMessagesPerUser.remove(userId);
         receivedServicesPerUser.remove(userId);
-
-        logger.info("[WBFT] ══ Runda zakończona dla user={} ══", userId);
     }
 
     /* ================================================================

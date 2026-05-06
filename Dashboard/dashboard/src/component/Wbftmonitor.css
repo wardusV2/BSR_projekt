@@ -87,7 +87,7 @@
 /* ── Metric cards ────────────────────────────────────────────── */
 .metrics-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 10px;
   margin-bottom: 1.5rem;
 }
@@ -497,6 +497,35 @@
   .footer-hint {
     color: #5f5e5a;
   }
+
+  .wbft-history-row {
+    border-bottom-color: rgba(255,255,255,0.07);
+  }
+
+  .wbft-history-cat {
+    color: #e8e8e6;
+  }
+
+  .tab-btn:hover,
+  .tab-btn--active {
+    background: #2c2c2a;
+    color: #e8e8e6;
+  }
+
+  .tab-btn--active {
+    border-color: rgba(255,255,255,0.1);
+  }
+
+  .card-tabs {
+    border-bottom-color: rgba(255,255,255,0.1);
+  }
+
+  .verdict-weight-cat,
+  .verdict-weight-val,
+  .wbft-history-user,
+  .wbft-history-ratio {
+    color: #888780;
+  }
 }
 
 /* ── Responsive ──────────────────────────────────────────────── */
@@ -518,4 +547,143 @@
   .services-grid {
     grid-template-columns: repeat(4, 1fr);
   }
+}
+
+/* ── Tabs ────────────────────────────────────────────────────── */
+.card-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 0.5px solid rgba(0,0,0,0.1);
+  padding-bottom: 8px;
+}
+
+.tab-btn {
+  height: 28px;
+  font-size: 12px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 0.5px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  color: #6b6b68;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tab-btn:hover {
+  background: #f2f2f0;
+  color: #1a1a1a;
+}
+
+.tab-btn--active {
+  background: #f2f2f0;
+  color: #1a1a1a;
+  border-color: rgba(0,0,0,0.12);
+  font-weight: 500;
+}
+
+/* ── Verdict detail ──────────────────────────────────────────── */
+.verdict-weight-sums {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.verdict-weight-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+}
+
+.verdict-weight-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.verdict-weight-cat {
+  width: 80px;
+  flex-shrink: 0;
+  color: #6b6b68;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verdict-weight-val {
+  width: 70px;
+  text-align: right;
+  color: #6b6b68;
+  flex-shrink: 0;
+}
+
+/* ── Byzantine ───────────────────────────────────────────────── */
+.byzantine-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.byzantine-label {
+  font-size: 11px;
+  color: #A32D2D;
+  font-weight: 500;
+}
+
+.byzantine-pill {
+  background: #FCEBEB;
+  color: #A32D2D;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* ── WBFT History ────────────────────────────────────────────── */
+.wbft-history {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  font-size: 12px;
+  font-family: "Menlo","Consolas","Monaco",monospace;
+}
+
+.wbft-history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 0.5px solid rgba(0,0,0,0.07);
+  flex-wrap: wrap;
+}
+
+.wbft-history-row:last-child {
+  border-bottom: none;
+}
+
+.wbft-history-user {
+  color: #6b6b68;
+  width: 40px;
+  flex-shrink: 0;
+}
+
+.wbft-history-cat {
+  color: #1a1a1a;
+  font-weight: 500;
+  flex: 1;
+  min-width: 60px;
+}
+
+.wbft-history-ratio {
+  color: #6b6b68;
+  width: 44px;
+  text-align: right;
+  flex-shrink: 0;
 }
