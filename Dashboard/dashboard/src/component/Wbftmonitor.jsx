@@ -10,46 +10,43 @@ const SVC_NAMES = [
   "Service1","Service2","Service3",
   "Service4","Service5","Service6","Service7",
 ];
-const CAT_COLORS = [
-  "#3266ad","#1D9E75","#D4537E",
-  "#BA7517","#534AB7","#D85A30","#888780",
-];
-
-// Wyniki WBFT z backendu (/monitor/wbft) mają strukturę:
-// { userId, category, status, winnerRatio, totalWeight,
-//   weightSums:{cat->weight}, byzantineSuspects:[svc,...],
-//   voterCount, confident, timestamp }
+const CAT_COLORS = {
+  ACTION:      "#3266ad",
+  COMEDY:      "#1D9E75",
+  DRAMA:       "#D4537E",
+  THRILLER:    "#BA7517",
+  DOCUMENTARY: "#534AB7",
+  OTHER:       "#888780",
+};
+const CAT_COLOR_LIST = Object.values(CAT_COLORS);
 
 function ts(ms) {
   return new Date(ms).toTimeString().slice(0, 8);
 }
 
+/* ─── mock data ───────────────────────────────────────────────────── */
 function generateMockLogs() {
   const cats = ["ACTION","COMEDY","DRAMA","THRILLER","DOCUMENTARY"];
-  const logs = [];
   const now = Date.now();
-  for (let i = 0; i < 42; i++) {
+  return Array.from({ length: 42 }, (_, i) => {
     const svc = SVC_NAMES[i % SVC_NAMES.length];
     const cat = cats[Math.floor(Math.random() * cats.length)];
-    const w   = parseFloat((1 + Math.random() * 3).toFixed(1));
-    logs.push({
+    return {
       type: "RABBIT_IN",
       service: svc,
       routingKey: "vote." + svc,
-      weight: w,
+      weight: parseFloat((1 + Math.random() * 3).toFixed(1)),
       content: { userId: 10 + (i % 5), category: cat },
       timestamp: now - (41 - i) * 8000,
-    });
-  }
-  return logs;
+    };
+  });
 }
 
 function generateMockWbft() {
   const cats     = ["ACTION","COMEDY","DRAMA","THRILLER","DOCUMENTARY"];
   const statuses = ["UNANIMOUS","CONSENSUS","NO_QUORUM"];
-  const results  = [];
   const now      = Date.now();
-  for (let i = 0; i < 12; i++) {
+  return Array.from({ length: 12 }, (_, i) => {
     const cat   = cats[Math.floor(Math.random() * cats.length)];
     const st    = statuses[Math.floor(Math.random() * statuses.length)];
     const total = parseFloat((10 + Math.random() * 8).toFixed(1));
@@ -57,7 +54,7 @@ function generateMockWbft() {
     const alt   = cats.find((c) => c !== cat) || "OTHER";
     const weightSums = { [cat]: winW };
     if (st !== "UNANIMOUS") weightSums[alt] = parseFloat((total - winW).toFixed(1));
-    results.push({
+    return {
       userId:            10 + (i % 5),
       category:          st === "NO_QUORUM" ? "OTHER" : cat,
       status:            st,
@@ -70,16 +67,26 @@ function generateMockWbft() {
       voterCount: 7,
       confident:  st !== "NO_QUORUM",
       timestamp:  now - (11 - i) * 35000,
-    });
-  }
-  return results;
+      nodeVotes: SVC_NAMES.map(svc => ({
+        service: svc,
+        category: st === "NO_QUORUM" && Math.random() > 0.6
+          ? cats[Math.floor(Math.random() * cats.length)]
+          : cat,
+        weight: parseFloat((1 + Math.random() * 3).toFixed(1)),
+        state: st === "NO_QUORUM" && Math.random() > 0.6 ? "byzantine" : "ok",
+        timedOut: false,
+      })),
+    };
+  });
 }
 
-function MetricCard({ label, value, sub, danger }) {
+/* ─── sub-components ──────────────────────────────────────────────── */
+
+function MetricCard({ label, value, sub, danger, accent }) {
   return (
-    <div className="metric-card">
+    <div className={`metric-card${danger ? " metric-card--danger" : ""}${accent ? " metric-card--accent" : ""}`}>
       <div className="metric-label">{label}</div>
-      <div className={`metric-value${danger ? " metric-value--danger" : ""}`}>{value}</div>
+      <div className="metric-value">{value ?? "—"}</div>
       <div className="metric-sub">{sub}</div>
     </div>
   );
@@ -100,7 +107,7 @@ function ServicePill({ name, status, lastSeen }) {
 function VoteBars({ logs }) {
   const rabbitLogs = logs.filter((l) => l.type === "RABBIT_IN" && l.content?.category);
   if (!rabbitLogs.length)
-    return <div className="vote-bars-empty">Brak danych – oczekiwanie na głosy...</div>;
+    return <div className="empty-hint">Oczekiwanie na głosy…</div>;
 
   const catCounts = {};
   rabbitLogs.slice(-35).forEach((l) => {
@@ -115,11 +122,11 @@ function VoteBars({ logs }) {
         const pct = Math.round((cnt / total) * 100);
         return (
           <div className="vote-row" key={cat}>
-            <div className="vote-row-label" title={cat}>{cat}</div>
+            <div className="vote-row-label">{cat}</div>
             <div className="vote-bar-bg">
               <div
                 className="vote-bar-fill"
-                style={{ width: `${pct}%`, background: CAT_COLORS[i % CAT_COLORS.length] }}
+                style={{ width: `${pct}%`, background: CAT_COLOR_LIST[i % CAT_COLOR_LIST.length] }}
               />
             </div>
             <div className="vote-pct">{pct}%</div>
@@ -130,26 +137,23 @@ function VoteBars({ logs }) {
   );
 }
 
-function WbftChart({ wbftResults }) {
+function WbftStatusChart({ wbftResults }) {
   const counts = { UNANIMOUS: 0, CONSENSUS: 0, NO_QUORUM: 0, NO_DATA: 0 };
-  wbftResults.forEach((r) => {
-    if (counts[r.status] !== undefined) counts[r.status]++;
-  });
+  wbftResults.forEach((r) => { if (counts[r.status] !== undefined) counts[r.status]++; });
   const data = [
     { name: "UNANIMOUS", value: counts.UNANIMOUS, color: "#1D9E75" },
     { name: "CONSENSUS",  value: counts.CONSENSUS,  color: "#3266ad" },
     { name: "NO_QUORUM",  value: counts.NO_QUORUM,  color: "#E24B4A" },
     { name: "NO_DATA",    value: counts.NO_DATA,    color: "#888780" },
   ];
-
   return (
-    <ResponsiveContainer width="100%" height={155}>
-      <BarChart data={data} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
-        <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-        <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+    <ResponsiveContainer width="100%" height={140}>
+      <BarChart data={data} margin={{ top: 4, right: 4, left: -22, bottom: 0 }}>
+        <XAxis dataKey="name" tick={{ fontSize: 9 }} />
+        <YAxis allowDecimals={false} tick={{ fontSize: 10 }} />
         <Tooltip
           formatter={(v) => [v, "wyniki"]}
-          contentStyle={{ fontSize: 12, borderRadius: 6 }}
+          contentStyle={{ fontSize: 11, borderRadius: 6 }}
         />
         <Bar dataKey="value" radius={[4, 4, 0, 0]}>
           {data.map((d) => <Cell key={d.name} fill={d.color} />)}
@@ -159,105 +163,207 @@ function WbftChart({ wbftResults }) {
   );
 }
 
-function LastVerdict({ wbftResults }) {
-  const last = [...wbftResults].sort((a, b) => b.timestamp - a.timestamp)[0];
-  if (!last) return <div className="last-verdict-empty">Oczekiwanie na wynik WBFT...</div>;
+/* ─── WBFT Node Visualization ─────────────────────────────────────── */
 
-  const { status, category, userId, winnerRatio, totalWeight,
-          weightSums, byzantineSuspects, confident } = last;
+function NodeGrid({ result }) {
+  if (!result) return <div className="empty-hint">Brak danych węzłów.</div>;
 
-  const cls =
-    status === "UNANIMOUS" ? "badge--unanimous"
-    : status === "CONSENSUS" ? "badge--consensus"
-    : "badge--no-quorum";
-
-  const pct = winnerRatio != null ? (winnerRatio * 100).toFixed(1) + "%" : null;
+  const nodeVotes = result.nodeVotes || SVC_NAMES.map(svc => ({
+    service: svc,
+    category: result.category,
+    weight: null,
+    state: "ok",
+    timedOut: false,
+  }));
 
   return (
-    <div className="last-verdict">
-      <div className="last-verdict-row">
-        <span className="last-verdict-label">Ostatni wynik:</span>
-        <span className={`consensus-badge ${cls}`}>{status}</span>
-        {confident === false && (
-          <span className="badge badge--warn" style={{ fontSize: 10 }}>niepewny</span>
+    <div className="node-grid">
+      {nodeVotes.map((nv) => {
+        const stateClass = nv.timedOut ? "timeout"
+          : nv.state === "byzantine" ? "byzantine"
+          : nv.state === "missing"   ? "missing"
+          : "ok";
+        const short = nv.service.replace("Service", "S");
+        return (
+          <div key={nv.service} className={`node-card node-card--${stateClass}`}>
+            {nv.state === "byzantine" && <div className="node-badge node-badge--byz">!</div>}
+            {nv.timedOut && <div className="node-badge node-badge--timeout">⏱</div>}
+            <div className="node-name">{short}</div>
+            <div
+              className="node-cat"
+              style={{ color: nv.category ? (CAT_COLORS[nv.category] || "#888") : undefined }}
+            >
+              {nv.category || "—"}
+            </div>
+            <div className="node-weight">
+              {nv.weight != null ? `w=${nv.weight.toFixed(1)}` : "brak"}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ThresholdBar({ label, ratio, threshold, thresholdLabel }) {
+  const pct    = Math.min(100, Math.round(ratio * 100));
+  const tPct   = Math.round(threshold * 100);
+  const passed = ratio >= threshold;
+  return (
+    <div className="threshold-wrap">
+      <div className="threshold-header">
+        <span className="threshold-label">{label}</span>
+        <span className={`threshold-value ${passed ? "threshold-value--pass" : "threshold-value--fail"}`}>
+          {pct}% {passed ? "✓" : "✗"}
+        </span>
+      </div>
+      <div className="threshold-track">
+        <div
+          className="threshold-fill"
+          style={{
+            width: `${pct}%`,
+            background: passed ? "#1D9E75" : "#E24B4A",
+          }}
+        />
+        <div className="threshold-marker" style={{ left: `${tPct}%` }}>
+          <span className="threshold-marker-label">{thresholdLabel}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WbftDetailPanel({ result }) {
+  if (!result) return <div className="empty-hint">Oczekiwanie na wynik WBFT…</div>;
+
+  const { status, category, userId, winnerRatio, totalWeight,
+          weightSums, byzantineSuspects, confident, nodeVotes, timestamp } = result;
+
+  const voterCount = nodeVotes?.filter(n => !n.timedOut && n.state !== "missing").length ?? result.voterCount ?? 0;
+  const timedOut   = nodeVotes?.filter(n => n.timedOut) ?? [];
+
+  const catSorted  = weightSums
+    ? Object.entries(weightSums).sort((a, b) => b[1] - a[1])
+    : [];
+  const totalW = catSorted.reduce((s, [,v]) => s + v, 0);
+
+  const relativeDiff = catSorted.length >= 2
+    ? (catSorted[0][1] - catSorted[1][1]) / totalW
+    : catSorted.length === 1 ? 1 : 0;
+
+  const statusCls = status === "UNANIMOUS" ? "badge--unanimous"
+    : status === "CONSENSUS"               ? "badge--consensus"
+    : "badge--noquorum";
+
+  return (
+    <>
+      {/* Verdict row */}
+      <div className="verdict-box">
+        <div className="verdict-row">
+          <span className={`status-badge ${statusCls}`}>{status}</span>
+          <span className="verdict-winner">{category}</span>
+          {confident === false && (
+            <span className="badge-warn">niepewny</span>
+          )}
+          {timedOut.length > 0 && (
+            <span className="badge-timeout">timeout: {timedOut.map(t => t.service.replace("Service","S")).join(", ")}</span>
+          )}
+        </div>
+        <div className="verdict-meta">
+          user=<strong>{userId}</strong> &nbsp;·&nbsp;
+          waga zwycięzcy: <strong>{(winnerRatio * 100).toFixed(1)}%</strong> &nbsp;·&nbsp;
+          Σ=<strong>{totalWeight?.toFixed(1)}</strong> &nbsp;·&nbsp;
+          węzłów: <strong>{voterCount}/7</strong> &nbsp;·&nbsp;
+          {ts(timestamp)}
+        </div>
+        {byzantineSuspects?.length > 0 && (
+          <div className="byzantine-row">
+            <span className="byzantine-label">Byzantine suspects:</span>
+            {byzantineSuspects.map(s => (
+              <span key={s} className="byzantine-pill">{s.replace("Service","S")}</span>
+            ))}
+          </div>
         )}
       </div>
 
-      <div className="last-verdict-detail">
-        user=<strong>{userId}</strong> &rarr; <strong>{category}</strong>
-        {pct ? ` · ${pct} wagi` : ""}
-        {totalWeight != null ? ` · Σ=${totalWeight.toFixed(1)}` : ""}
-        {" · "}{ts(last.timestamp)}
-      </div>
+      {/* Node grid */}
+      <div className="section-title" style={{ marginTop: 14 }}>Węzły satelitarne</div>
+      <NodeGrid result={result} />
 
-      {weightSums && Object.keys(weightSums).length > 0 && (
-        <div className="verdict-weight-sums">
-          {Object.entries(weightSums)
-            .sort((a, b) => b[1] - a[1])
-            .map(([cat, w], i) => {
-              const sum  = Object.values(weightSums).reduce((s, v) => s + v, 0);
-              const pctW = sum > 0 ? Math.round((w / sum) * 100) : 0;
+      {/* Thresholds */}
+      <div className="section-title" style={{ marginTop: 14 }}>Progi decyzyjne</div>
+      <ThresholdBar
+        label="Kworum zwycięzcy"
+        ratio={winnerRatio ?? 0}
+        threshold={2/3}
+        thresholdLabel="66.7%"
+      />
+      <ThresholdBar
+        label="Uczestnictwo węzłów"
+        ratio={voterCount / 7}
+        threshold={4/7}
+        thresholdLabel="4/7"
+      />
+      <ThresholdBar
+        label="Margines przewagi"
+        ratio={relativeDiff}
+        threshold={0.10}
+        thresholdLabel="10%"
+      />
+
+      {/* Weight distribution */}
+      {catSorted.length > 0 && (
+        <>
+          <div className="section-title" style={{ marginTop: 14 }}>Wagi per kategoria</div>
+          <div className="weight-bars">
+            {catSorted.map(([cat, w], i) => {
+              const pct  = totalW > 0 ? Math.round(w / totalW * 100) : 0;
+              const color = CAT_COLORS[cat] || CAT_COLOR_LIST[i % CAT_COLOR_LIST.length];
               return (
-                <div className="verdict-weight-row" key={cat}>
-                  <span
-                    className="verdict-weight-dot"
-                    style={{ background: CAT_COLORS[i % CAT_COLORS.length] }}
-                  />
-                  <span className="verdict-weight-cat">{cat}</span>
-                  <div className="vote-bar-bg" style={{ flex: 1, height: 10 }}>
-                    <div
-                      className="vote-bar-fill"
-                      style={{
-                        width: `${pctW}%`,
-                        background: CAT_COLORS[i % CAT_COLORS.length],
-                        height: "100%",
-                      }}
-                    />
+                <div className="weight-row" key={cat}>
+                  <div className="weight-dot" style={{ background: color }} />
+                  <div className="weight-cat">{cat}</div>
+                  <div className="vote-bar-bg" style={{ flex: 1 }}>
+                    <div className="vote-bar-fill" style={{ width: `${pct}%`, background: color }} />
                   </div>
-                  <span className="verdict-weight-val">{w.toFixed(1)} ({pctW}%)</span>
+                  <div className="weight-val">{w.toFixed(1)} ({pct}%)</div>
                 </div>
               );
             })}
-        </div>
+          </div>
+        </>
       )}
-
-      {byzantineSuspects && byzantineSuspects.length > 0 && (
-        <div className="byzantine-row">
-          <span className="byzantine-label">Byzantine suspects:</span>
-          {byzantineSuspects.map((s) => (
-            <span className="byzantine-pill" key={s}>{s}</span>
-          ))}
-        </div>
-      )}
-    </div>
+    </>
   );
 }
 
 function WbftHistory({ wbftResults }) {
   const sorted = [...wbftResults].sort((a, b) => b.timestamp - a.timestamp).slice(0, 20);
-  if (!sorted.length) return <div className="log-empty">Brak wyników WBFT.</div>;
-
+  if (!sorted.length) return <div className="empty-hint">Brak wyników WBFT.</div>;
   return (
     <div className="wbft-history">
       {sorted.map((r, i) => {
-        const cls =
-          r.status === "UNANIMOUS" ? "badge--unanimous"
+        const cls = r.status === "UNANIMOUS" ? "badge--unanimous"
           : r.status === "CONSENSUS" ? "badge--consensus"
-          : "badge--no-quorum";
-        const pct      = r.winnerRatio != null ? (r.winnerRatio * 100).toFixed(1) + "%" : "—";
+          : "badge--noquorum";
+        const pct = r.winnerRatio != null ? (r.winnerRatio * 100).toFixed(1) + "%" : "—";
         const suspects = r.byzantineSuspects?.length ?? 0;
+        const timedOut = r.nodeVotes?.filter(n => n.timedOut).length ?? 0;
         return (
-          <div className="wbft-history-row" key={i}>
+          <div className="history-row" key={i}>
             <span className="log-time">{ts(r.timestamp)}</span>
-            <span className={`consensus-badge ${cls}`} style={{ fontSize: 10, padding: "2px 7px" }}>
-              {r.status}
-            </span>
-            <span className="wbft-history-user">u={r.userId}</span>
-            <span className="wbft-history-cat">{r.category}</span>
-            <span className="wbft-history-ratio">{pct}</span>
+            <span className={`status-badge status-badge--sm ${cls}`}>{r.status}</span>
+            <span className="history-user">u={r.userId}</span>
+            <span className="history-cat">{r.category}</span>
+            <span className="history-ratio">{pct}</span>
             {suspects > 0 && (
               <span className="byzantine-pill" style={{ fontSize: 10 }}>
-                {suspects} suspect{suspects > 1 ? "s" : ""}
+                {suspects}B
+              </span>
+            )}
+            {timedOut > 0 && (
+              <span className="badge-timeout" style={{ fontSize: 10 }}>
+                {timedOut}T
               </span>
             )}
           </div>
@@ -276,7 +382,7 @@ function LogRow({ log }) {
 
   let msg = "";
   if (log.type === "RABBIT_IN") {
-    msg = `routingKey=${log.routingKey || ""} userId=${log.content?.userId ?? "?"} cat=${log.content?.category ?? "?"} w=${log.weight ?? "?"}`;
+    msg = `rk=${log.routingKey || ""} userId=${log.content?.userId ?? "?"} cat=${log.content?.category ?? "?"} w=${log.weight ?? "?"}`;
   } else if (log.type === "WBFT") {
     msg = `status=${log.content?.status ?? "?"} cat=${log.content?.category ?? "?"} user=${log.content?.userId ?? "?"}`;
   } else {
@@ -287,30 +393,32 @@ function LogRow({ log }) {
     <div className="log-row">
       <span className="log-time">{ts(log.timestamp || Date.now())}</span>
       <span className={`log-type ${typeClass}`}>{log.type || "?"}</span>
-      <span className="log-svc">{log.service || "?"}</span>
+      <span className="log-svc">{(log.service || "?").replace("Service","S")}</span>
       <span className="log-msg">{msg}</span>
     </div>
   );
 }
 
+/* ─── Main component ──────────────────────────────────────────────── */
+
 export default function WbftMonitor() {
-  const [logs,        setLogs]        = useState([]);
-  const [wbftResults, setWbftResults] = useState([]);
-  const [activeUsers, setActiveUsers] = useState([]);
-  const [connStatus,  setConnStatus]  = useState("connecting");
-  const [filterType,  setFilterType]  = useState("");
-  const [filterSvc,   setFilterSvc]   = useState("");
-  const [activeTab,   setActiveTab]   = useState("last");
-  const [svcStatus,   setSvcStatus]   = useState(
+  const [logs,         setLogs]         = useState([]);
+  const [wbftResults,  setWbftResults]  = useState([]);
+  const [activeUsers,  setActiveUsers]  = useState([]);
+  const [connStatus,   setConnStatus]   = useState("connecting");
+  const [filterType,   setFilterType]   = useState("");
+  const [filterSvc,    setFilterSvc]    = useState("");
+  const [activeTab,    setActiveTab]    = useState("detail");
+  const [selectedIdx,  setSelectedIdx]  = useState(0);
+  const [svcStatus,    setSvcStatus]    = useState(
     Object.fromEntries(SVC_NAMES.map((s) => [s, { status: "idle", lastSeen: null }]))
   );
 
   const updateSvcStatus = useCallback((newLogs) => {
-    const rabbitLogs = newLogs.filter((l) => l.type === "RABBIT_IN");
-    const now  = Date.now();
+    const now = Date.now();
     const next = {};
     SVC_NAMES.forEach((svc) => {
-      const last  = [...rabbitLogs].reverse().find((l) => l.service === svc);
+      const last  = [...newLogs].reverse().find((l) => l.service === svc && l.type === "RABBIT_IN");
       const fresh = last && (now - last.timestamp < 40000);
       next[svc]   = { status: last ? (fresh ? "ok" : "warn") : "idle", lastSeen: last?.timestamp ?? null };
     });
@@ -325,13 +433,11 @@ export default function WbftMonitor() {
         fetch(BASE + "/monitor/wbft",  { signal: AbortSignal.timeout(3000) }),
       ]);
       if (!stateRes.ok || !logsRes.ok) throw new Error("bad status");
-
       const [stateData, newLogs, newWbft] = await Promise.all([
         stateRes.json(),
         logsRes.json(),
         wbftRes.ok ? wbftRes.json() : Promise.resolve([]),
       ]);
-
       setLogs(newLogs);
       setWbftResults(Array.isArray(newWbft) ? newWbft : []);
       setActiveUsers(Object.keys(stateData.activeUsers || {}));
@@ -359,10 +465,13 @@ export default function WbftMonitor() {
     return () => clearInterval(id);
   }, [fetchAll]);
 
-  const now    = Date.now();
-  const total  = logs.filter((l) => l.type === "RABBIT_IN").length;
-  const rate   = logs.filter((l) => l.type === "RABBIT_IN" && now - l.timestamp < 60000).length;
-  const dlx    = logs.filter((l) => l.type === "DLX" || l.type === "ERROR").length;
+  const now   = Date.now();
+  const total = logs.filter((l) => l.type === "RABBIT_IN").length;
+  const rate  = logs.filter((l) => l.type === "RABBIT_IN" && now - l.timestamp < 60000).length;
+  const dlx   = logs.filter((l) => l.type === "DLX" || l.type === "ERROR").length;
+
+  const sortedWbft  = [...wbftResults].sort((a, b) => b.timestamp - a.timestamp);
+  const selectedResult = sortedWbft[selectedIdx] ?? null;
 
   const filteredLogs = logs
     .filter((l) => {
@@ -373,44 +482,47 @@ export default function WbftMonitor() {
     .slice(-60)
     .reverse();
 
-  const connLabel =
-    connStatus === "online"   ? "Połączony"
-    : connStatus === "demo"   ? "Demo (offline)"
+  const connLabel = connStatus === "online" ? "Połączony"
+    : connStatus === "demo"    ? "Demo"
     : connStatus === "offline" ? "Offline"
-    : "Łączenie...";
-
-  const connCls =
-    connStatus === "online"   ? "badge badge--live"
-    : connStatus === "offline" ? "badge badge--error"
+    : "Łączenie…";
+  const connCls = connStatus === "online" ? "badge badge--live"
+    : connStatus === "offline"            ? "badge badge--error"
     : "badge badge--warn";
+
+  const byzantineCount = sortedWbft.reduce((acc, r) => acc + (r.byzantineSuspects?.length ?? 0), 0);
 
   return (
     <div className="monitor">
+      {/* ── Top bar ── */}
       <div className="top-bar">
-        <h1 className="top-bar__title">
+        <div className="top-bar__left">
           <span className="dot-blink" aria-hidden="true" />
-          WBFT System Monitor
-        </h1>
+          <h1 className="top-bar__title">WBFT Monitor</h1>
+        </div>
         <div className="top-bar__actions">
           {activeUsers.length > 0 && (
-            <span className="badge badge--warn">
-              {activeUsers.length} aktywna runda{activeUsers.length > 1 ? "y" : ""}
-            </span>
+            <span className="badge badge--warn">{activeUsers.length} aktywna runda</span>
           )}
           <span className={connCls}>{connLabel}</span>
-          <button onClick={fetchAll} className="btn">↺ Odśwież</button>
+          <button onClick={fetchAll} className="btn">↺</button>
         </div>
       </div>
 
+      {/* ── Metrics ── */}
       <div className="metrics-grid">
-        <MetricCard label="Wiadomości łącznie" value={total || "—"} sub="od startu monitorowania" />
-        <MetricCard label="Aktywne rundy"       value={activeUsers.length || "0"} sub="oczekujące głosy" />
-        <MetricCard label="Głosy / min"         value={rate}              sub="ostatnie 60 s" />
-        <MetricCard label="Rund WBFT"           value={wbftResults.length} sub="zakończonych" />
-        <MetricCard label="Dead letter"         value={dlx} sub="odrzucone wiad." danger={dlx > 0} />
+        <MetricCard label="Wiadomości" value={total || "—"} sub="łącznie" />
+        <MetricCard label="Aktywne rundy" value={activeUsers.length || "0"} sub="oczekują głosów" accent />
+        <MetricCard label="Głosy / min" value={rate} sub="ostatnie 60 s" />
+        <MetricCard label="Rundy WBFT" value={wbftResults.length} sub="zakończone" />
+        <MetricCard label="Byzantine" value={byzantineCount} sub="wykryte węzły" danger={byzantineCount > 0} />
+        <MetricCard label="Dead letter" value={dlx} sub="odrzucone" danger={dlx > 0} />
       </div>
 
-      <div className="grid2">
+      {/* ── Main grid ── */}
+      <div className="main-grid">
+
+        {/* Left: serwisy + głosy */}
         <div className="card">
           <div className="section-title">Serwisy satelitarne</div>
           <div className="services-grid">
@@ -423,19 +535,18 @@ export default function WbftMonitor() {
               />
             ))}
           </div>
-          <div style={{ marginTop: 14 }}>
-            <div className="section-title">Rozkład głosów (ostatnie 35)</div>
-            <VoteBars logs={logs} />
-          </div>
+          <div className="section-title" style={{ marginTop: 16 }}>Rozkład głosów (ostatnie 35)</div>
+          <VoteBars logs={logs} />
         </div>
 
+        {/* Right: WBFT results */}
         <div className="card">
           <div className="card-tabs">
             <button
-              className={`tab-btn${activeTab === "last" ? " tab-btn--active" : ""}`}
-              onClick={() => setActiveTab("last")}
+              className={`tab-btn${activeTab === "detail" ? " tab-btn--active" : ""}`}
+              onClick={() => setActiveTab("detail")}
             >
-              Ostatni wynik
+              Szczegóły wyniku
             </button>
             <button
               className={`tab-btn${activeTab === "history" ? " tab-btn--active" : ""}`}
@@ -443,19 +554,61 @@ export default function WbftMonitor() {
             >
               Historia ({wbftResults.length})
             </button>
+            <button
+              className={`tab-btn${activeTab === "chart" ? " tab-btn--active" : ""}`}
+              onClick={() => setActiveTab("chart")}
+            >
+              Wykres
+            </button>
           </div>
 
-          {activeTab === "last" ? (
+          {activeTab === "detail" && (
             <>
-              <WbftChart wbftResults={wbftResults} />
-              <LastVerdict wbftResults={wbftResults} />
+              {sortedWbft.length > 1 && (
+                <div className="result-selector">
+                  <label className="result-selector-label">Runda:</label>
+                  <select
+                    className="result-selector-select"
+                    value={selectedIdx}
+                    onChange={e => setSelectedIdx(Number(e.target.value))}
+                  >
+                    {sortedWbft.map((r, i) => (
+                      <option key={i} value={i}>
+                        {ts(r.timestamp)} · u={r.userId} · {r.status}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <WbftDetailPanel result={selectedResult} />
             </>
-          ) : (
+          )}
+
+          {activeTab === "history" && (
             <WbftHistory wbftResults={wbftResults} />
+          )}
+
+          {activeTab === "chart" && (
+            <>
+              <WbftStatusChart wbftResults={wbftResults} />
+              <div className="chart-legend">
+                {[
+                  { label: "UNANIMOUS", color: "#1D9E75" },
+                  { label: "CONSENSUS", color: "#3266ad" },
+                  { label: "NO_QUORUM", color: "#E24B4A" },
+                ].map(({ label, color }) => (
+                  <span key={label} className="chart-legend-item">
+                    <span className="chart-legend-dot" style={{ background: color }} />
+                    {label}
+                  </span>
+                ))}
+              </div>
+            </>
           )}
         </div>
       </div>
 
+      {/* ── Logs ── */}
       <div className="card">
         <div className="log-header">
           <div className="section-title" style={{ marginBottom: 0 }}>Logi komunikacji</div>
@@ -465,14 +618,14 @@ export default function WbftMonitor() {
               onChange={(e) => setFilterType(e.target.value)}
               className="log-select"
             >
-              <option value="">Wszystkie</option>
+              <option value="">Wszystkie typy</option>
               <option value="RABBIT_IN">RABBIT_IN</option>
               <option value="WBFT">WBFT</option>
               <option value="ERROR">ERROR</option>
             </select>
             <input
               type="text"
-              placeholder="Serwis..."
+              placeholder="Serwis…"
               value={filterSvc}
               onChange={(e) => setFilterSvc(e.target.value)}
               className="log-input"
@@ -487,14 +640,14 @@ export default function WbftMonitor() {
         </div>
         <div className="log-list">
           {filteredLogs.length === 0
-            ? <div className="log-empty">Brak pasujących logów.</div>
+            ? <div className="empty-hint">Brak pasujących logów.</div>
             : filteredLogs.map((log, i) => <LogRow key={i} log={log} />)
           }
         </div>
       </div>
 
       <div className="footer-hint">
-        Dane z <code>localhost:8081/monitor/logs</code> · <code>/monitor/state</code> · <code>/monitor/wbft</code> · odświeżanie co 5 s
+        Dane z <code>localhost:8081/monitor</code> · odświeżanie co 5 s
       </div>
     </div>
   );

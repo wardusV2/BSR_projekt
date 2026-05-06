@@ -1,48 +1,47 @@
 package com.example.mainservice.DTO;
+
 import java.util.List;
 import java.util.Map;
 
 /**
  * Wynik jednej rundy algorytmu Weighted BFT.
+ *
+ * Record — gettery generowane automatycznie jako nazwa_pola().
+ * Dodano pole confident() dla wygody frontendu.
  */
 public record WbftResult(
 
-        // Zwycięska kategoria lub "OTHER" gdy brak kworum
         String category,
-
-        // Status rundy
         Status status,
-
-        // Sumy wag per kategoria
         Map<String, Double> weightSums,
-
-        // Całkowita suma wag
         double totalWeight,
-
-        // Suma wag zwycięzcy
         double winnerWeight,
-
-        // Stosunek wag zwycięzcy do sumy (0.0–1.0)
         double winnerRatio,
-
-        // Węzły podejrzane o błąd bizantyjski
         List<String> byzantineSuspects,
-
-        // Liczba głosujących węzłów
         int voterCount
+
 ) {
     public enum Status {
-        // Wyraźne kworum – pewny wynik
         CONSENSUS,
-        // Brak kworum – wynik niepewny
         NO_QUORUM,
-        // Pojedyncza kategoria (wszyscy zgodni)
         UNANIMOUS,
-        // Brak danych
         NO_DATA
     }
 
     public boolean isConfident() {
         return status == Status.CONSENSUS || status == Status.UNANIMOUS;
     }
+
+    // ── Aliasy dla VoteAggregatorService ────────────────────────────────────
+    // Rekordy generują gettery jako category(), status() itd. (bez "get").
+    // Poniższe metody to wygodne aliasy, żeby kod w serwisie był czytelny.
+
+    public String getCategory()                  { return category(); }
+    public Status getStatus()                    { return status(); }
+    public Map<String, Double> getWeightSums()   { return weightSums(); }
+    public double getTotalWeight()               { return totalWeight(); }
+    public double getWinnerWeight()              { return winnerWeight(); }
+    public double getWinnerRatio()               { return winnerRatio(); }
+    public List<String> getByzantineSuspects()   { return byzantineSuspects(); }
+    public int getVoterCount()                   { return voterCount(); }
 }

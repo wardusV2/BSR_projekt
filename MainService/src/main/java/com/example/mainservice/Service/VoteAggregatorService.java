@@ -1,5 +1,6 @@
 package com.example.mainservice.Service;
 
+import com.example.mainservice.DTO.RoundState;
 import com.example.mainservice.DTO.ServiceMessage;
 import com.example.mainservice.DTO.UserCategoryPayload;
 import com.example.mainservice.DTO.WbftResult;
@@ -7,198 +8,271 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Koordynator WBFT – zbiera głosy satelit z RabbitMQ,
- * uruchamia algorytm gdy wszystkie głosy dotarły,
- * zapisuje wynik i powiadamia frontend przez WebSocket.
+ * Agreguje głosy satelit i uruchamia algorytm WBFT.
+ *
+ * Trzy ścieżki zakończenia rundy:
+ * ────────────────────────────────
+ * A) Pełna liczba głosów (7/7)  → natychmiastowe WBFT w wątku VoteListener.
+ * B) Kworum miękkie (≥5 głosów) → natychmiastowe WBFT (bez czekania na resztę).
+ * C) Timeout (>30 s)            → WBFT uruchamiany przez @Scheduled co 5 s.
+ *
+ * Flaga RoundState.finished (volatile) gwarantuje, że WBFT wykona się
+ * dokładnie raz nawet przy współbieżnych wywołaniach.
  */
 @Service
 public class VoteAggregatorService {
 
-    private static final Logger logger =
-            LoggerFactory.getLogger(VoteAggregatorService.class);
+    private static final Logger log = LoggerFactory.getLogger(VoteAggregatorService.class);
 
-
-    private static final Set<String> EXPECTED_SERVICES = Set.of(
-            "Service1", "Service2", "Service3",
-            "Service4", "Service5", "Service6", "Service7"
+    /** Wszystkie znane serwisy satelitarne. */
+    private static final List<String> ALL_SERVICES = List.of(
+            "Service1","Service2","Service3","Service4","Service5","Service6","Service7"
     );
 
-    // userId -> (serviceName -> message)
-    private final ConcurrentHashMap<Integer, ConcurrentHashMap<String, ServiceMessage>>
-            lastMessagesPerUser = new ConcurrentHashMap<>();
+    /* ── zależności ── */
 
-    // userId -> set(serviceName)
-    private final ConcurrentHashMap<Integer, Set<String>>
-            receivedServicesPerUser = new ConcurrentHashMap<>();
+    private final WbftAlgorithm      wbftAlgorithm;
+    private final WbftResultService  wbftResultService;
+    private final MonitoringLogService logService;
 
-    private final WbftAlgorithm wbftAlgorithm;
-    private final RecommendationClient recommendationClient;
-    private final SimpMessagingTemplate wsTemplate;
-    private final WbftResultService wbftResultService;
+    /* ── stan aktywnych rund ── */
 
-    public VoteAggregatorService(
-            WbftAlgorithm wbftAlgorithm,
-            RecommendationClient recommendationClient,
-            @Lazy SimpMessagingTemplate wsTemplate,
-            WbftResultService wbftResultService          // ← DODAJ
-    ) {
-        this.wbftAlgorithm        = wbftAlgorithm;
-        this.recommendationClient = recommendationClient;
-        this.wsTemplate           = wsTemplate;
-        this.wbftResultService    = wbftResultService;   // ← DODAJ
+    /**
+     * Mapa: userId → RoundState.
+     * ConcurrentHashMap chroni przed race-condition przy równoległych głosach.
+     */
+    private final Map<Integer, RoundState> activeRounds = new ConcurrentHashMap<>();
+
+    public VoteAggregatorService(WbftAlgorithm wbftAlgorithm,
+                                 WbftResultService wbftResultService,
+                                 MonitoringLogService logService) {
+        this.wbftAlgorithm     = wbftAlgorithm;
+        this.wbftResultService = wbftResultService;
+        this.logService        = logService;
     }
 
-    /* ================================================================
-       GŁÓWNA METODA – wywołana przez VoteListener (RabbitMQ)
-       ================================================================ */
+    /* ══════════════════════════════════════════════════════════════
+       PRZYJMOWANIE GŁOSU
+       ══════════════════════════════════════════════════════════════ */
 
+    /**
+     * Główny punkt wejścia — wywoływany przez VoteListener przy każdej wiadomości z RabbitMQ.
+     */
     public void processVote(ServiceMessage message) {
-        extractPayload(message).ifPresentOrElse(
-                payload -> handleValidVote(message, payload),
-                () -> logger.warn("Odrzucono wiadomość – brak poprawnego payload: {}", message)
-        );
-    }
+        Object rawUserId = extractUserId(message);
+        if (rawUserId == null) {
+            log.warn("Głos bez userId od {}", message.getServiceName());
+            return;
+        }
+        int userId = ((Number) rawUserId).intValue();
 
-    /* ================================================================
-       OBSŁUGA GŁOSU
-       ================================================================ */
+        // Pobierz istniejącą rundę lub utwórz nową
+        RoundState round = activeRounds.computeIfAbsent(userId, RoundState::new);
 
-    private void handleValidVote(ServiceMessage message, UserCategoryPayload payload) {
+        if (round.isFinished()) {
+            // Runda już zamknięta — nowy głos zaczyna kolejną rundę
+            round = new RoundState(userId);
+            activeRounds.put(userId, round);
+            log.info("Nowa runda dla userId={} (poprzednia zamknięta)", userId);
+        }
 
-        Integer userId      = payload.userId();
-        String  serviceName = message.getServiceName();
+        round.addVote(message.getServiceName(), message);
 
-        lastMessagesPerUser
-                .computeIfAbsent(userId, id -> new ConcurrentHashMap<>())
-                .put(serviceName, message);
+        log.info("Głos od {} dla userId={} ({}/{} głosów)",
+                message.getServiceName(), userId,
+                round.getVoteCount(), RoundState.TOTAL_NODES);
 
-        receivedServicesPerUser
-                .computeIfAbsent(userId, id -> ConcurrentHashMap.newKeySet())
-                .add(serviceName);
-
-        int received = receivedServicesPerUser.get(userId).size();
-        int expected = EXPECTED_SERVICES.size();
-
-        logger.info("[WBFT] user={} głos od {} ({}/{}) serwisy={}",
-                userId, serviceName, received, expected,
-                receivedServicesPerUser.get(userId));
-
-        if (receivedServicesPerUser.get(userId).containsAll(EXPECTED_SERVICES)) {
-            runWbftForUser(userId);
+        // Sprawdź czy uruchomić WBFT natychmiast
+        if (round.shouldFinish()) {
+            runWbft(userId, round);
         }
     }
 
-    /* ================================================================
+    /* ══════════════════════════════════════════════════════════════
+       SCHEDULER — TIMEOUT
+       ══════════════════════════════════════════════════════════════ */
+
+    /**
+     * Co 5 sekund sprawdza, czy jakaś aktywna runda przekroczyła timeout.
+     * Jeśli tak — uruchamia WBFT na zebranych dotąd głosach.
+     *
+     * Wymaga @EnableScheduling w klasie konfiguracyjnej lub main.
+     */
+    @Scheduled(fixedDelay = 5_000)
+    public void checkTimeouts() {
+        if (activeRounds.isEmpty()) return;
+
+        activeRounds.forEach((userId, round) -> {
+            if (!round.isFinished() && round.isTimedOut()) {
+                int count = round.getVoteCount();
+                log.warn("TIMEOUT rundy dla userId={} po {} ms — zebrano {}/{} głosów",
+                        userId, round.ageMs(), count, RoundState.TOTAL_NODES);
+                runWbft(userId, round);
+            }
+        });
+    }
+
+    /* ══════════════════════════════════════════════════════════════
        URUCHOMIENIE WBFT
-       ================================================================ */
+       ══════════════════════════════════════════════════════════════ */
 
-    private void runWbftForUser(Integer userId) {
-        Map<String, ServiceMessage> votes = lastMessagesPerUser.get(userId);
-
-        WbftResult result = wbftAlgorithm.compute(votes);
-        logWbftResult(userId, result);
-
-        // ── ZAPISZ WYNIK DO WbftResultService ─────────────────────
-        Map<String, Object> resultEntry = new java.util.HashMap<>();
-        resultEntry.put("userId",            userId);
-        resultEntry.put("category",          result.category());
-        resultEntry.put("status",            result.status().name());
-        resultEntry.put("winnerRatio",       result.winnerRatio());
-        resultEntry.put("totalWeight",       result.totalWeight());
-        resultEntry.put("weightSums",        result.weightSums());
-        resultEntry.put("byzantineSuspects", result.byzantineSuspects());
-        resultEntry.put("voterCount",        result.voterCount());
-        resultEntry.put("confident",         result.isConfident());
-        resultEntry.put("timestamp",         System.currentTimeMillis());
-        wbftResultService.save(resultEntry);
-        // ─────────────────────────────────────────────────────────
-
-        recommendationClient.saveRecommendation(userId, result.category());
-        notifyFrontend(userId, result);
-
-        lastMessagesPerUser.remove(userId);
-        receivedServicesPerUser.remove(userId);
-    }
-
-    /* ================================================================
-       WEBSOCKET → FRONTEND
-       ================================================================ */
-
-    private void notifyFrontend(Integer userId, WbftResult result) {
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("userId",            userId);
-        payload.put("category",          result.category());
-        payload.put("status",            result.status().name());
-        payload.put("winnerRatio",       Math.round(result.winnerRatio() * 1000) / 10.0);
-        payload.put("totalWeight",       result.totalWeight());
-        payload.put("weightSums",        result.weightSums());
-        payload.put("byzantineSuspects", result.byzantineSuspects());
-        payload.put("voterCount",        result.voterCount());
-        payload.put("confident",         result.isConfident());
-
-        wsTemplate.convertAndSend("/topic/verdict", (Object) payload);
-    }
-
-    /* ================================================================
-       PAYLOAD EXTRACTION
-       ================================================================ */
-
-    private Optional<UserCategoryPayload> extractPayload(ServiceMessage msg) {
-        if (!(msg.getContent() instanceof Map<?, ?> map)) return Optional.empty();
-        try {
-            Integer userId   = (Integer) map.get("userId");
-            String  category = (String)  map.get("category");
-            if (userId == null || category == null) return Optional.empty();
-            return Optional.of(new UserCategoryPayload(userId, category));
-        } catch (Exception e) {
-            return Optional.empty();
-        }
-    }
-
-    /* ================================================================
-       LOGGING WYNIKU
-       ================================================================ */
-
-    private void logWbftResult(Integer userId, WbftResult result) {
-        switch (result.status()) {
-            case UNANIMOUS ->
-                    logger.info("[WBFT] UNANIMOUS user={} → {}", userId, result.category());
-            case CONSENSUS ->
-                    logger.info("[WBFT] CONSENSUS user={} → {} ({:.1f}% wagi, {} byzantine suspects)",
-                            userId, result.category(),
-                            result.winnerRatio() * 100,
-                            result.byzantineSuspects().size());
-            case NO_QUORUM ->
-                    logger.warn("[WBFT] NO_QUORUM user={} → brak consensusu, zapis OTHER. " +
-                                    "Najlepszy kandydat miał {:.1f}% wagi (próg {}%)",
-                            userId,
-                            result.winnerRatio() * 100,
-                            (int)(2.0 / 3.0 * 100));
-            case NO_DATA ->
-                    logger.error("[WBFT] NO_DATA user={} → brak danych do głosowania", userId);
+    /**
+     * Uruchamia algorytm WBFT dla danej rundy.
+     * Metoda jest idempotentna dzięki RoundState.markFinished().
+     */
+    private void runWbft(int userId, RoundState round) {
+        // Atomowe oznaczenie rundy jako zakończonej
+        if (!round.markFinished()) {
+            log.debug("WBFT dla userId={} już uruchomiony — pomijam", userId);
+            return;
         }
 
-        if (!result.byzantineSuspects().isEmpty()) {
-            logger.warn("[WBFT] ⚠ Byzantine suspects dla user={}: {}",
-                    userId, result.byzantineSuspects());
-        }
+        // Usunięcie z mapy aktywnych rund
+        activeRounds.remove(userId, round);
+
+        List<String> missing = round.missingSenders(ALL_SERVICES);
+        boolean timedOut = round.isTimedOut() && round.getVoteCount() < RoundState.TOTAL_NODES;
+
+        log.info("Uruchamiam WBFT dla userId={} | głosy={}/{} | timeout={} | brakuje={}",
+                userId, round.getVoteCount(), RoundState.TOTAL_NODES, timedOut, missing);
+
+        // Oblicz wynik WBFT
+        WbftResult result = wbftAlgorithm.compute(round.getVotes());
+
+        // Wzbogać wynik o metadane rundy
+        Map<String, Object> resultMap = buildResultMap(userId, result, round, missing, timedOut);
+
+        // Zapisz wynik
+        wbftResultService.addResult(resultMap);
+
+        // Log monitoringu
+        logService.log(Map.of(
+                "type",      "WBFT",
+                "service",   "MainService",
+                "timestamp", System.currentTimeMillis(),
+                "content",   Map.of(
+                        "userId",   userId,
+                        "status",   result.getStatus().name(),
+                        "category", result.getCategory(),
+                        "timedOut", timedOut,
+                        "missing",  missing
+                )
+        ));
+
+        log.info("WBFT zakończony dla userId={} → status={} kategoria={}",
+                userId, result.getStatus(), result.getCategory());
     }
 
-    /* ================================================================
-       DEBUG
-       ================================================================ */
+    /* ══════════════════════════════════════════════════════════════
+       BUDOWANIE ODPOWIEDZI
+       ══════════════════════════════════════════════════════════════ */
 
+    /**
+     * Buduje mapę wynikową przekazywaną do WbftResultService i frontendu.
+     * Zawiera pole nodeVotes potrzebne do wizualizacji węzłów.
+     */
+    private Map<String, Object> buildResultMap(int userId,
+                                               WbftResult result,
+                                               RoundState round,
+                                               List<String> missing,
+                                               boolean timedOut) {
+        // Wyznacz kategorię zwycięzcy do porównania z głosami
+        String winnerCategory = result.getCategory();
+
+        // Zbuduj listę głosów per węzeł (dla frontendu)
+        List<Map<String, Object>> nodeVotes = new ArrayList<>();
+        round.getVotes().forEach((svc, msg) -> {
+            String cat = extractCategory(msg);
+            boolean isByzantine = result.getByzantineSuspects().contains(svc);
+            nodeVotes.add(Map.of(
+                    "service",   svc,
+                    "category",  cat != null ? cat : "?",
+                    "weight",    msg.getWeight(),
+                    "state",     isByzantine ? "byzantine" : "ok",
+                    "timedOut",  false
+            ));
+        });
+
+        // Dodaj węzły, które nie odpowiedziały
+        missing.forEach(svc -> nodeVotes.add(Map.of(
+                "service",  svc,
+                "category", "",
+                "weight",   0.0,
+                "state",    "missing",
+                "timedOut", timedOut
+        )));
+
+        // Sortuj: Service1…Service7
+        nodeVotes.sort(Comparator.comparing(m -> (String) m.get("service")));
+
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("userId",            userId);
+        map.put("category",          result.getCategory());
+        map.put("status",            result.getStatus().name());
+        map.put("winnerRatio",       result.getWinnerRatio());
+        map.put("totalWeight",       result.getTotalWeight());
+        map.put("weightSums",        result.getWeightSums());
+        map.put("byzantineSuspects", result.getByzantineSuspects());
+        map.put("voterCount",        round.getVoteCount());
+        map.put("confident",         result.getStatus() != WbftResult.Status.NO_QUORUM);
+        map.put("timedOut",          timedOut);
+        map.put("missingSenders",    missing);
+        map.put("nodeVotes",         nodeVotes);
+        map.put("timestamp",         System.currentTimeMillis());
+        return map;
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       EKSTRAKCJA DANYCH
+       ══════════════════════════════════════════════════════════════ */
+
+    private Object extractUserId(ServiceMessage msg) {
+        if (msg.getContent() instanceof Map<?, ?> m) return m.get("userId");
+        return null;
+    }
+
+    private String extractCategory(ServiceMessage msg) {
+        if (msg.getContent() instanceof Map<?, ?> m) {
+            Object cat = m.get("category");
+            return cat instanceof String s ? s : null;
+        }
+        return null;
+    }
+
+    /* ══════════════════════════════════════════════════════════════
+       DIAGNOSTYKA
+       ══════════════════════════════════════════════════════════════ */
+
+    /**
+     * Stan aktywnych rund — używany przez MonitoringController (/monitor/state).
+     */
     public Map<String, Object> getDebugState() {
-        return Map.of(
-                "activeUsers",      lastMessagesPerUser.keySet(),
-                "receivedServices", receivedServicesPerUser,
-                "expectedServices", EXPECTED_SERVICES
-        );
+        Map<String, Object> state = new LinkedHashMap<>();
+
+        Map<String, Object> users = new LinkedHashMap<>();
+        activeRounds.forEach((userId, round) -> {
+            Map<String, Object> info = new LinkedHashMap<>();
+            info.put("voteCount",   round.getVoteCount());
+            info.put("totalNodes",  RoundState.TOTAL_NODES);
+            info.put("ageMs",       round.ageMs());
+            info.put("timedOut",    round.isTimedOut());
+            info.put("missing",     round.missingSenders(ALL_SERVICES));
+            info.put("senders",     new ArrayList<>(round.getVotes().keySet()));
+            users.put(String.valueOf(userId), info);
+        });
+
+        state.put("activeUsers",   users);
+        state.put("totalRounds",   users.size());
+        state.put("timeoutMs",     RoundState.ROUND_TIMEOUT_MS);
+        state.put("minVotes",      RoundState.MIN_VOTES_FOR_EARLY_WBFT);
+        state.put("serverTimeMs",  System.currentTimeMillis());
+        return state;
     }
 }
