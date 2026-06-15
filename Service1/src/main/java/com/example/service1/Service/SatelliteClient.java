@@ -14,46 +14,36 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.*;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.Base64;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Properties;
 
 /**
  * Satelita Service1 – wysyła podpisane głosy do MainService przez RabbitMQ.
  *
- * Zmiany względem oryginału (warstwa security):
- * ──────────────────────────────────────────────
- * 1. Przy starcie generuje parę kluczy ECDSA (secp256r1).
- *    Klucz publiczny jest logowany w formacie Base64 – należy go
- *    skopiować do pliku config/satellite-keys.properties w MainService.
- *
- * 2. Każdy głos jest podpisywany kluczem prywatnym przed wysłaniem.
- *    Payload podpisu: serviceName|category|weight|timestamp
- *
- * 3. ServiceMessage zawiera teraz pola signature i timestamp.
- *
- * Uwaga produkcyjna:
- * ──────────────────
- * Klucz prywatny powinien być generowany raz i przechowywany
- * w bezpiecznym magazynie (HSM, Vault, Keystore). Tu generowany
- * przy każdym starcie dla uproszczenia – w produkcji zastąp przez
- * SatelliteKeyManager.
+ * Zmiany względem oryginału:
+ * ──────────────────────────
+ * + śledzenie stanu pętli (loopRunning, lastFailureReason)
+ * + metoda getHealthStatus() dla SatelliteHealthIndicator
+ * Pozostała logika bez zmian.
  */
 @Component
 public class SatelliteClient {
@@ -81,6 +71,10 @@ public class SatelliteClient {
     private final HttpClient       httpClient     = HttpClient.newHttpClient();
     private final ObjectMapper     mapper;
 
+    // ── Stan zdrowia pętli ────────────────────────────────────────────────────
+    private final AtomicBoolean         loopRunning     = new AtomicBoolean(false);
+    private final AtomicReference<String> failureReason = new AtomicReference<>("");
+
     // ── Klucze ECDSA ──────────────────────────────────────────────────────────
     private PrivateKey privateKey;
     private PublicKey  publicKey;
@@ -91,7 +85,7 @@ public class SatelliteClient {
         this.mapper.registerModule(new JavaTimeModule());
     }
 
-    // ── Inicjalizacja: generowanie kluczy + start pętli ──────────────────────
+    // ── Inicjalizacja ─────────────────────────────────────────────────────────
 
     @PostConstruct
     public void init() {
@@ -99,113 +93,104 @@ public class SatelliteClient {
         startSendingLoop();
     }
 
+    // ── Health status (dla SatelliteHealthIndicator) ──────────────────────────
+
+    /**
+     * Zwraca aktualny stan zdrowia satelity.
+     * Wywoływane przez SatelliteHealthIndicator → /actuator/health.
+     */
+    public HealthStatus getHealthStatus() {
+        return new HealthStatus(
+                serviceName,
+                loopRunning.get(),
+                messageCounter.get(),
+                failureReason.get()
+        );
+    }
+
+    /**
+     * Snapshot stanu zdrowia satelity.
+     *
+     * @param serviceName   nazwa satelity
+     * @param loopRunning   czy pętla wysyłania działa poprawnie
+     * @param messagesSent  łączna liczba wysłanych głosów
+     * @param failureReason przyczyna awarii (pusta gdy UP)
+     */
+    public record HealthStatus(
+            String  serviceName,
+            boolean loopRunning,
+            int     messagesSent,
+            String  failureReason
+    ) {}
+
+    // ── Klucze ───────────────────────────────────────────────────────────────
 
     private void loadOrCreateKeys() {
         try {
-
             if (Files.exists(PRIVATE_KEY_FILE)) {
                 loadPrivateKey();
                 logger.info("{} -> załadowano istniejące klucze", serviceName);
                 return;
             }
-
             generateAndSaveKeys();
-
             logger.info("{} -> wygenerowano nową parę kluczy", serviceName);
-
         } catch (Exception e) {
             throw new IllegalStateException("Nie można załadować kluczy", e);
         }
     }
 
     private void generateAndSaveKeys() throws Exception {
-
         KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
         kpg.initialize(256);
-
         KeyPair keyPair = kpg.generateKeyPair();
-
         this.privateKey = keyPair.getPrivate();
-        this.publicKey = keyPair.getPublic();
-
+        this.publicKey  = keyPair.getPublic();
         savePrivateKey();
         savePublicKeyToMainService();
     }
+
     private void savePrivateKey() throws Exception {
-
         Files.createDirectories(PRIVATE_KEY_FILE.getParent());
-
         Properties props = new Properties();
-
-        props.setProperty(
-                "privateKey",
-                Base64.getEncoder().encodeToString(
-                        privateKey.getEncoded()
-                )
-        );
-
-        props.setProperty(
-                "publicKey",
-                Base64.getEncoder().encodeToString(
-                        publicKey.getEncoded()
-                )
-        );
-
+        props.setProperty("privateKey",
+                Base64.getEncoder().encodeToString(privateKey.getEncoded()));
+        props.setProperty("publicKey",
+                Base64.getEncoder().encodeToString(publicKey.getEncoded()));
         try (OutputStream out = Files.newOutputStream(PRIVATE_KEY_FILE)) {
             props.store(out, "Satellite private/public key");
         }
     }
 
     private void loadPrivateKey() throws Exception {
-
         Properties props = new Properties();
-
         try (InputStream in = Files.newInputStream(PRIVATE_KEY_FILE)) {
             props.load(in);
         }
-
-        String privateKeyBase64 = props.getProperty("privateKey");
-        String publicKeyBase64 = props.getProperty("publicKey");
-
         KeyFactory keyFactory = KeyFactory.getInstance("EC");
-
         this.privateKey = keyFactory.generatePrivate(
                 new PKCS8EncodedKeySpec(
-                        Base64.getDecoder().decode(privateKeyBase64)
-                )
-        );
-
+                        Base64.getDecoder().decode(props.getProperty("privateKey"))));
         this.publicKey = keyFactory.generatePublic(
                 new X509EncodedKeySpec(
-                        Base64.getDecoder().decode(publicKeyBase64)
-                )
-        );
+                        Base64.getDecoder().decode(props.getProperty("publicKey"))));
     }
+
     private void savePublicKeyToMainService() throws Exception {
-
         Properties props = new Properties();
-
         if (Files.exists(MAIN_SERVICE_KEYS_FILE)) {
             try (InputStream in = Files.newInputStream(MAIN_SERVICE_KEYS_FILE)) {
                 props.load(in);
             }
         }
-
-        String publicKeyBase64 =
-                Base64.getEncoder().encodeToString(publicKey.getEncoded());
-
-        props.setProperty(serviceName, publicKeyBase64);
-
+        props.setProperty(serviceName,
+                Base64.getEncoder().encodeToString(publicKey.getEncoded()));
         try (OutputStream out = Files.newOutputStream(MAIN_SERVICE_KEYS_FILE)) {
             props.store(out, "Satellite public keys");
         }
-
-        logger.info(
-                "{} -> zapisano klucz publiczny do {}",
-                serviceName,
-                MAIN_SERVICE_KEYS_FILE.toAbsolutePath()
-        );
+        logger.info("{} -> zapisano klucz publiczny do {}",
+                serviceName, MAIN_SERVICE_KEYS_FILE.toAbsolutePath());
     }
+
     // ── Główna pętla ──────────────────────────────────────────────────────────
 
     private void startSendingLoop() {
@@ -218,6 +203,10 @@ public class SatelliteClient {
 
         scheduler.scheduleAtFixedRate(() -> {
             try {
+                // Oznacz pętlę jako działającą na starcie iteracji
+                loopRunning.set(true);
+                failureReason.set("");
+
                 List<UserDTO> users = fetchUsers();
                 logger.info("{} → przetwarzam {} użytkowników", serviceName, users.size());
 
@@ -225,7 +214,6 @@ public class SatelliteClient {
                     List<WatchHistoryDTO> history = fetchWatchHistory(user.id());
                     String bestCategory = calculateMostWatchedCategory(history);
 
-                    // Zbuduj i podpisz głos
                     ServiceMessage message = buildSignedVote(user.id(), bestCategory);
 
                     String routingKey = "vote." + serviceName;
@@ -244,30 +232,31 @@ public class SatelliteClient {
 
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
+                loopRunning.set(false);
+                failureReason.set("Pętla przerwana (InterruptedException)");
                 logger.warn("{} loop przerwany", serviceName);
+
             } catch (Exception e) {
+                // Oznacz pętlę jako niezdrową – actuator zwróci DOWN
+                loopRunning.set(false);
+                failureReason.set(e.getClass().getSimpleName() + ": " + e.getMessage());
                 logger.error("{} błąd w pętli głównej", serviceName, e);
+                // Nie rzucamy dalej – scheduler uruchomi kolejną iterację
             }
         }, 5, 25, TimeUnit.SECONDS);
+
+        // Oznacz jako DOWN dopóki pierwsza iteracja się nie wykona
+        loopRunning.set(false);
+        failureReason.set("Oczekiwanie na pierwszą iterację (5s opóźnienie startu)");
     }
 
     // ── Budowanie i podpisywanie głosu ────────────────────────────────────────
 
-    /**
-     * Tworzy ServiceMessage z podpisem ECDSA.
-     *
-     * Payload do podpisu: serviceName|category|weight|timestamp
-     * (musi być identyczny z WbftAlgorithm.buildPayload())
-     */
     private ServiceMessage buildSignedVote(int userId, String category) throws GeneralSecurityException {
         long timestamp = System.currentTimeMillis();
+        MostWatchedCategoryMessage payload = new MostWatchedCategoryMessage(userId, category);
 
-        MostWatchedCategoryMessage payload =
-                new MostWatchedCategoryMessage(userId, category);
-
-        // Payload podpisywany przez węzeł – identyczny format jak w WbftAlgorithm
         String sigPayload = serviceName + "|" + category + "|" + weight + "|" + timestamp;
-
         Signature sig = Signature.getInstance(SIG_ALGORITHM);
         sig.initSign(privateKey);
         sig.update(sigPayload.getBytes(StandardCharsets.UTF_8));
@@ -319,28 +308,5 @@ public class SatelliteClient {
                 .max(Map.Entry.comparingByValue())
                 .map(Map.Entry::getKey)
                 .orElse("NONE");
-    }
-    //
-    private void savePublicKeyToProperties(String publicKeyB64) {
-        try {
-            Properties properties = new Properties();
-
-            if (Files.exists(MAIN_SERVICE_KEYS_FILE)) {
-                try (InputStream in = Files.newInputStream(MAIN_SERVICE_KEYS_FILE)) {
-                    properties.load(in);
-                }
-            }
-
-            properties.setProperty(serviceName, publicKeyB64);
-
-            try (OutputStream out = Files.newOutputStream(MAIN_SERVICE_KEYS_FILE)) {
-                properties.store(out, "Satellite public keys");
-            }
-
-            logger.info("Klucz publiczny zapisany do {}", MAIN_SERVICE_KEYS_FILE.toAbsolutePath());
-
-        } catch (Exception e) {
-            logger.error("Nie można zapisać klucza publicznego", e);
-        }
     }
 }

@@ -25,11 +25,27 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 @Component
 public class SatelliteClient {
+    /**
+     * Snapshot stanu zdrowia satelity.
+     *
+     * @param serviceName   nazwa satelity
+     * @param loopRunning   czy pętla wysyłania działa poprawnie
+     * @param messagesSent  łączna liczba wysłanych głosów
+     * @param failureReason przyczyna awarii (pusta gdy UP)
+     */
+    public record HealthStatus(
+            String  serviceName,
+            boolean loopRunning,
+            int     messagesSent,
+            String  failureReason
+    ) {}
 
     private static final Logger logger = LoggerFactory.getLogger(SatelliteClient.class);
 
@@ -39,6 +55,9 @@ public class SatelliteClient {
     private static final String SERVICE_API_KEY   = "SUPER_SECRET_SERVICE_KEY_123";
     private static final String SIG_ALGORITHM     = "SHA256withECDSA";
 
+    private final AtomicBoolean loopRunning     = new AtomicBoolean(false);
+    private final AtomicReference<String> failureReason = new AtomicReference<>("");
+    private final AtomicInteger    messageCounter = new AtomicInteger(0);
     @Value("${satellite.name:Service2}")
     private String serviceName;
 
@@ -69,7 +88,18 @@ public class SatelliteClient {
         loadOrCreateKeys();
         startLoop();
     }
-
+    /**
+     * Zwraca aktualny stan zdrowia satelity.
+     * Wywoływane przez SatelliteHealthIndicator → /actuator/health.
+     */
+    public HealthStatus getHealthStatus() {
+        return new HealthStatus(
+                serviceName,
+                loopRunning.get(),
+                messageCounter.get(),
+                failureReason.get()
+        );
+    }
 
     private void loadOrCreateKeys() {
         try {
@@ -181,6 +211,7 @@ public class SatelliteClient {
     // ── Główna pętla ──────────────────────────────────────────────────────────
 
     private void startLoop() {
+
         ScheduledExecutorService scheduler =
                 Executors.newSingleThreadScheduledExecutor(r -> {
                     Thread t = new Thread(r, serviceName + "-loop");
@@ -189,31 +220,71 @@ public class SatelliteClient {
                 });
 
         scheduler.scheduleAtFixedRate(() -> {
+
             try {
+
                 List<UserDTO> users = fetchUsers();
-                logger.info("{} → przetwarzam {} użytkowników", serviceName, users.size());
+
+                logger.info("{} → przetwarzam {} użytkowników",
+                        serviceName,
+                        users.size());
 
                 for (UserDTO user : users) {
-                    List<SubscribedUserDTO> subscriptions = fetchSubscriptions(user.id());
-                    List<VideoDTO> videos = fetchVideosOfSubscribedUsers(subscriptions);
-                    String bestCategory = calculateCategory(videos);
 
-                    ServiceMessage message = buildSignedVote(user.id(), bestCategory);
+                    List<SubscribedUserDTO> subscriptions =
+                            fetchSubscriptions(user.id());
+
+                    List<VideoDTO> videos =
+                            fetchVideosOfSubscribedUsers(subscriptions);
+
+                    String bestCategory =
+                            calculateCategory(videos);
+
+                    ServiceMessage message =
+                            buildSignedVote(user.id(), bestCategory);
 
                     String routingKey = "vote." + serviceName;
-                    rabbitTemplate.convertAndSend("votes.topic", routingKey, message);
 
-                    logger.info("#{} → [{}] user={} category={}",
-                            counter.incrementAndGet(), routingKey, user.id(), bestCategory);
+                    rabbitTemplate.convertAndSend(
+                            "votes.topic",
+                            routingKey,
+                            message
+                    );
+
+                    messageCounter.incrementAndGet();
+
+                    logger.info(
+                            "#{} → [{}] user={} category={}",
+                            counter.incrementAndGet(),
+                            routingKey,
+                            user.id(),
+                            bestCategory
+                    );
 
                     Thread.sleep(200);
                 }
-            } catch (InterruptedException ie) {
+
+                loopRunning.set(true);
+                failureReason.set("");
+
+            }
+            catch (InterruptedException ie) {
+
                 Thread.currentThread().interrupt();
+
+                loopRunning.set(false);
+                failureReason.set("Thread interrupted");
+
                 logger.warn("{} loop przerwany", serviceName);
-            } catch (Exception e) {
+            }
+            catch (Exception e) {
+
+                loopRunning.set(false);
+                failureReason.set(e.getMessage());
+
                 logger.error("{} błąd w pętli", serviceName, e);
             }
+
         }, 5, 25, TimeUnit.SECONDS);
     }
 
