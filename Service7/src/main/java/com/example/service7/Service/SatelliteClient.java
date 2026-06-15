@@ -10,10 +10,18 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.*;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -55,6 +63,11 @@ public class SatelliteClient {
     private static final String SERVICE_API_KEY =
             "SUPER_SECRET_SERVICE_KEY_123";
 
+    private static final Path MAIN_SERVICE_KEYS_FILE =
+            Paths.get("../MainService/src/main/java/com/example/mainservice/Config/satellite-keys.properties");
+    private static final Path PRIVATE_KEY_FILE =
+            Paths.get("keys", "service7-private.properties");
+
     /* ================= CONFIG ================= */
 
     @Value("${satellite.name:Service7}")
@@ -65,6 +78,9 @@ public class SatelliteClient {
 
     @Value("${fault.injection.crash:0.2}")
     private double crashProbability;
+
+    private PrivateKey privateKey;
+    private PublicKey publicKey;
 
     /* ================= STATE ================= */
 
@@ -80,8 +96,120 @@ public class SatelliteClient {
     /* =========================================================
        LOOP – start po 15s, co 40s
        ========================================================= */
-
     @PostConstruct
+    public void init() {
+        loadOrCreateKeys();
+        startLoop();
+    }
+
+    private void loadOrCreateKeys() {
+        try {
+
+            if (Files.exists(PRIVATE_KEY_FILE)) {
+                loadPrivateKey();
+                logger.info("{} -> załadowano istniejące klucze", serviceName);
+                return;
+            }
+
+            generateAndSaveKeys();
+
+            logger.info("{} -> wygenerowano nową parę kluczy", serviceName);
+
+        } catch (Exception e) {
+            throw new IllegalStateException("Nie można załadować kluczy", e);
+        }
+    }
+
+    private void generateAndSaveKeys() throws Exception {
+
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC");
+        kpg.initialize(256);
+
+        KeyPair keyPair = kpg.generateKeyPair();
+
+        this.privateKey = keyPair.getPrivate();
+        this.publicKey = keyPair.getPublic();
+
+        savePrivateKey();
+        savePublicKeyToMainService();
+    }
+    private void savePrivateKey() throws Exception {
+
+        Files.createDirectories(PRIVATE_KEY_FILE.getParent());
+
+        Properties props = new Properties();
+
+        props.setProperty(
+                "privateKey",
+                Base64.getEncoder().encodeToString(
+                        privateKey.getEncoded()
+                )
+        );
+
+        props.setProperty(
+                "publicKey",
+                Base64.getEncoder().encodeToString(
+                        publicKey.getEncoded()
+                )
+        );
+
+        try (OutputStream out = Files.newOutputStream(PRIVATE_KEY_FILE)) {
+            props.store(out, "Satellite private/public key");
+        }
+    }
+
+    private void loadPrivateKey() throws Exception {
+
+        Properties props = new Properties();
+
+        try (InputStream in = Files.newInputStream(PRIVATE_KEY_FILE)) {
+            props.load(in);
+        }
+
+        String privateKeyBase64 = props.getProperty("privateKey");
+        String publicKeyBase64 = props.getProperty("publicKey");
+
+        KeyFactory keyFactory = KeyFactory.getInstance("EC");
+
+        this.privateKey = keyFactory.generatePrivate(
+                new PKCS8EncodedKeySpec(
+                        Base64.getDecoder().decode(privateKeyBase64)
+                )
+        );
+
+        this.publicKey = keyFactory.generatePublic(
+                new X509EncodedKeySpec(
+                        Base64.getDecoder().decode(publicKeyBase64)
+                )
+        );
+    }
+    private void savePublicKeyToMainService() throws Exception {
+
+        Properties props = new Properties();
+
+        if (Files.exists(MAIN_SERVICE_KEYS_FILE)) {
+            try (InputStream in = Files.newInputStream(MAIN_SERVICE_KEYS_FILE)) {
+                props.load(in);
+            }
+        }
+
+        String publicKeyBase64 =
+                Base64.getEncoder().encodeToString(publicKey.getEncoded());
+
+        props.setProperty(serviceName, publicKeyBase64);
+
+        try (OutputStream out = Files.newOutputStream(MAIN_SERVICE_KEYS_FILE)) {
+            props.store(out, "Satellite public keys");
+        }
+
+        logger.info(
+                "{} -> zapisano klucz publiczny do {}",
+                serviceName,
+                MAIN_SERVICE_KEYS_FILE.toAbsolutePath()
+        );
+    }
+
+
     public void startLoop() {
 
         ScheduledExecutorService scheduler =
