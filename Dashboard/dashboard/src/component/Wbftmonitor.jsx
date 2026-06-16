@@ -399,18 +399,84 @@ function LogRow({ log }) {
   );
 }
 
+/* ─── Satellite Health Panel ──────────────────────────────────────── */
+
+function SatelliteHealthPanel({ health }) {
+  if (!health) {
+    return (
+      <div className="empty-hint">
+        Brak danych health monitor.
+      </div>
+    );
+  }
+
+  const services = Object.entries(health.services || {});
+
+  return (
+    <div className="sat-health-panel">
+      <div className="health-summary">
+        <MetricCard
+          label="Satelity"
+          value={health.totalServices}
+          sub="łącznie"
+        />
+        <MetricCard
+          label="DOWN"
+          value={health.downCount}
+          sub="niedostępne"
+          danger={health.downCount > 0}
+        />
+        <MetricCard
+          label="Próg alarmu"
+          value={`${health.alertThresholdMs / 1000}s`}
+          sub="heartbeat timeout"
+        />
+      </div>
+
+      <div className="health-grid">
+        {services.map(([name, svc]) => (
+          <div
+            key={name}
+            className={`health-card health-card--${svc.status?.toLowerCase()}`}
+          >
+            <div className="health-card-header">
+              <strong>{name}</strong>
+              <span
+                className={`status-badge ${
+                  svc.status === "UP"
+                    ? "badge--unanimous"
+                    : "badge--noquorum"
+                }`}
+              >
+                {svc.status}
+              </span>
+            </div>
+            <div className="health-info">
+              <div>URL: {svc.url}</div>
+              <div>Silence: {svc.silenceSec}s</div>
+              <div>Alert: {svc.alertSent ? "TAK" : "NIE"}</div>
+              <div>Last Seen: {svc.lastSeen ? ts(svc.lastSeen) : "brak"}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ─── Main component ──────────────────────────────────────────────── */
 
 export default function WbftMonitor() {
-  const [logs,         setLogs]         = useState([]);
-  const [wbftResults,  setWbftResults]  = useState([]);
-  const [activeUsers,  setActiveUsers]  = useState([]);
-  const [connStatus,   setConnStatus]   = useState("connecting");
-  const [filterType,   setFilterType]   = useState("");
-  const [filterSvc,    setFilterSvc]    = useState("");
-  const [activeTab,    setActiveTab]    = useState("detail");
-  const [selectedIdx,  setSelectedIdx]  = useState(0);
-  const [svcStatus,    setSvcStatus]    = useState(
+  const [logs,            setLogs]            = useState([]);
+  const [wbftResults,     setWbftResults]     = useState([]);
+  const [activeUsers,     setActiveUsers]     = useState([]);
+  const [satelliteHealth, setSatelliteHealth] = useState(null);
+  const [connStatus,      setConnStatus]      = useState("connecting");
+  const [filterType,      setFilterType]      = useState("");
+  const [filterSvc,       setFilterSvc]       = useState("");
+  const [activeTab,       setActiveTab]       = useState("detail");
+  const [selectedIdx,     setSelectedIdx]     = useState(0);
+  const [svcStatus,       setSvcStatus]       = useState(
     Object.fromEntries(SVC_NAMES.map((s) => [s, { status: "idle", lastSeen: null }]))
   );
 
@@ -427,20 +493,23 @@ export default function WbftMonitor() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [stateRes, logsRes, wbftRes] = await Promise.all([
-        fetch(BASE + "/monitor/state", { signal: AbortSignal.timeout(3000) }),
-        fetch(BASE + "/monitor/logs",  { signal: AbortSignal.timeout(3000) }),
-        fetch(BASE + "/monitor/wbft",  { signal: AbortSignal.timeout(3000) }),
+      const [stateRes, logsRes, wbftRes, healthRes] = await Promise.all([
+        fetch(BASE + "/monitor/state",            { signal: AbortSignal.timeout(3000) }),
+        fetch(BASE + "/monitor/logs",             { signal: AbortSignal.timeout(3000) }),
+        fetch(BASE + "/monitor/wbft",             { signal: AbortSignal.timeout(3000) }),
+        fetch(BASE + "/monitor/satellite-health", { signal: AbortSignal.timeout(3000) }),
       ]);
       if (!stateRes.ok || !logsRes.ok) throw new Error("bad status");
-      const [stateData, newLogs, newWbft] = await Promise.all([
+      const [stateData, newLogs, newWbft, healthData] = await Promise.all([
         stateRes.json(),
         logsRes.json(),
-        wbftRes.ok ? wbftRes.json() : Promise.resolve([]),
+        wbftRes.ok   ? wbftRes.json()   : Promise.resolve([]),
+        healthRes.ok ? healthRes.json() : Promise.resolve(null),
       ]);
       setLogs(newLogs);
       setWbftResults(Array.isArray(newWbft) ? newWbft : []);
       setActiveUsers(Object.keys(stateData.activeUsers || {}));
+      setSatelliteHealth(healthData);
       updateSvcStatus(newLogs);
       setConnStatus("online");
     } catch {
@@ -470,7 +539,7 @@ export default function WbftMonitor() {
   const rate  = logs.filter((l) => l.type === "RABBIT_IN" && now - l.timestamp < 60000).length;
   const dlx   = logs.filter((l) => l.type === "DLX" || l.type === "ERROR").length;
 
-  const sortedWbft  = [...wbftResults].sort((a, b) => b.timestamp - a.timestamp);
+  const sortedWbft     = [...wbftResults].sort((a, b) => b.timestamp - a.timestamp);
   const selectedResult = sortedWbft[selectedIdx] ?? null;
 
   const filteredLogs = logs
@@ -519,12 +588,18 @@ export default function WbftMonitor() {
         <MetricCard label="Dead letter" value={dlx} sub="odrzucone" danger={dlx > 0} />
       </div>
 
+      {/* ── Satellite Health ── */}
+      <div className="card">
+        <div className="section-title">Zdrowie serwisów satelitarnych</div>
+        <SatelliteHealthPanel health={satelliteHealth} />
+      </div>
+
       {/* ── Main grid ── */}
       <div className="main-grid">
 
         {/* Left: serwisy + głosy */}
         <div className="card">
-          <div className="section-title">Serwisy satelitarne</div>
+          {/* <div className="section-title">Serwisy satelitarne</div>
           <div className="services-grid">
             {SVC_NAMES.map((svc) => (
               <ServicePill
@@ -534,7 +609,7 @@ export default function WbftMonitor() {
                 lastSeen={svcStatus[svc]?.lastSeen}
               />
             ))}
-          </div>
+          </div> */}
           <div className="section-title" style={{ marginTop: 16 }}>Rozkład głosów (ostatnie 35)</div>
           <VoteBars logs={logs} />
         </div>
