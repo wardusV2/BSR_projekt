@@ -125,7 +125,7 @@ public class SatelliteHealthMonitor {
             return response.statusCode() >= 200 && response.statusCode() < 400;
 
         } catch (Exception e) {
-            log.error("HealthMonitor ping failed {}", url, e);
+//            log.error("HealthMonitor ping failed {}", url, e);
             return false;
         }
     }

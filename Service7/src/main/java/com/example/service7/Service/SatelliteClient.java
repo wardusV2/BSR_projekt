@@ -24,7 +24,9 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 /**
@@ -67,6 +69,9 @@ public class SatelliteClient {
             Paths.get("../MainService/src/main/java/com/example/mainservice/Config/satellite-keys.properties");
     private static final Path PRIVATE_KEY_FILE =
             Paths.get("keys", "service7-private.properties");
+
+    private final AtomicBoolean loopRunning = new AtomicBoolean(false);
+    private final AtomicReference<String> failureReason = new AtomicReference<>(null);
 
     /* ================= CONFIG ================= */
 
@@ -220,7 +225,8 @@ public class SatelliteClient {
                 });
 
         scheduler.scheduleAtFixedRate(() -> {
-
+            loopRunning.set(true);
+            failureReason.set(null);
             try {
 
                 /* ===============================
@@ -305,7 +311,11 @@ public class SatelliteClient {
                 Thread.currentThread().interrupt();
                 logger.warn("{} loop przerwany", serviceName);
             } catch (Exception e) {
-                logger.error("Service7 loop error", e);
+
+                loopRunning.set(false);
+                failureReason.set(e.getMessage());
+
+                logger.error("{} błąd w pętli", serviceName, e);
             }
 
         }, 5, 40, TimeUnit.SECONDS);
@@ -495,5 +505,19 @@ public class SatelliteClient {
                 .max(Map.Entry.comparingByValue())
                 .map(Map.Entry::getKey)
                 .orElse("OTHER");
+    }
+    public record HealthStatus(
+            String serviceName,
+            int messagesSent,
+            boolean loopRunning,
+            String failureReason
+    ) {}
+    public HealthStatus getHealthStatus() {
+        return new HealthStatus(
+                serviceName,
+                counter.get(),
+                loopRunning.get(),
+                failureReason.get()
+        );
     }
 }

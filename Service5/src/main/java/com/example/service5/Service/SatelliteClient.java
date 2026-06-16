@@ -27,7 +27,9 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 @Component
@@ -56,11 +58,30 @@ public class SatelliteClient {
     private final HttpClient     httpClient     = HttpClient.newHttpClient();
     private final ObjectMapper   mapper         = new ObjectMapper();
 
+    private final AtomicBoolean loopRunning = new AtomicBoolean(false);
+    private final AtomicReference<String> failureReason = new AtomicReference<>(null);
+
     private PrivateKey privateKey;
     private PublicKey publicKey;
 
     public SatelliteClient(RabbitTemplate rabbitTemplate) {
         this.rabbitTemplate = rabbitTemplate;
+    }
+
+    public record HealthStatus(
+            String serviceName,
+            int messagesSent,
+            boolean loopRunning,
+            String failureReason
+    ) {}
+
+    public HealthStatus getHealthStatus() {
+        return new HealthStatus(
+                serviceName,
+                messageCounter.get(),
+                loopRunning.get(),
+                failureReason.get()
+        );
     }
 
     // ── Inicjalizacja ─────────────────────────────────────────────────────────
@@ -189,6 +210,8 @@ public class SatelliteClient {
                 });
 
         scheduler.scheduleAtFixedRate(() -> {
+            loopRunning.set(true);
+            failureReason.set(null);
             try {
                 List<UserDTO> users  = fetchUsers();
                 List<VideoDTO> videos = fetchVideos();
@@ -211,6 +234,10 @@ public class SatelliteClient {
                 Thread.currentThread().interrupt();
                 logger.warn("{} loop przerwany", serviceName);
             } catch (Exception e) {
+
+                loopRunning.set(false);
+                failureReason.set(e.getMessage());
+
                 logger.error("{} błąd w pętli", serviceName, e);
             }
         }, 5, 32, TimeUnit.SECONDS);

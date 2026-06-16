@@ -28,7 +28,9 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 @Component
@@ -49,6 +51,9 @@ public class SatelliteClient {
     private static final Path PRIVATE_KEY_FILE =
             Paths.get("keys", "service4-private.properties");
 
+    private final AtomicBoolean loopRunning = new AtomicBoolean(false);
+    private final AtomicReference<String> failureReason = new AtomicReference<>(null);
+
     @Value("${satellite.name:Service4}")
     private String serviceName;
 
@@ -60,7 +65,20 @@ public class SatelliteClient {
     private final HttpClient     httpClient     = HttpClient.newHttpClient();
     private final ObjectMapper   mapper         = new ObjectMapper();
 
-
+    public record HealthStatus(
+            String serviceName,
+            int messagesSent,
+            boolean loopRunning,
+            String failureReason
+    ) {}
+    public HealthStatus getHealthStatus() {
+        return new HealthStatus(
+                serviceName,
+                messageCounter.get(),
+                loopRunning.get(),
+                failureReason.get()
+        );
+    }
 
     public SatelliteClient(RabbitTemplate rabbitTemplate) {
         this.rabbitTemplate = rabbitTemplate;
@@ -193,6 +211,8 @@ public class SatelliteClient {
                 });
 
         scheduler.scheduleAtFixedRate(() -> {
+            loopRunning.set(true);
+            failureReason.set(null);
             try {
                 List<UserDTO> users = fetchUsers();
                 logger.info("{} → przetwarzam {} użytkowników", serviceName, users.size());
@@ -215,6 +235,10 @@ public class SatelliteClient {
                 Thread.currentThread().interrupt();
                 logger.warn("{} loop przerwany", serviceName);
             } catch (Exception e) {
+
+                loopRunning.set(false);
+                failureReason.set(e.getMessage());
+
                 logger.error("{} błąd w pętli", serviceName, e);
             }
         }, 5, 30, TimeUnit.SECONDS);
