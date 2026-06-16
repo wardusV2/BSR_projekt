@@ -32,6 +32,9 @@ const MenuItems = () => {
       <Menu.Item key="/search">
         <Link to="/search">Search</Link>
       </Menu.Item>
+      <Menu.Item key="/wbfmonitor">
+        <Link to="/wbfmonitor">wbfmonitor</Link>
+      </Menu.Item>
       <Menu.Item key="username" disabled>
         {user?.nick || 'User'}
       </Menu.Item>

@@ -1,4 +1,4 @@
-import "./SatelliteHealthPanel.css";
+
 
 function SatelliteHealthPanel({ health }) {
   if (!health) {

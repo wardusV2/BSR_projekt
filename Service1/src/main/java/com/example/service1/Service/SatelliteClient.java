@@ -222,6 +222,9 @@ public class SatelliteClient {
                     if (fault.faultType() == FaultState.FaultType.OFFLINE) {
                         loopRunning.set(false);
                         failureReason.set("Tryb OFFLINE (fault injection)");
+
+                        logger.warn("{} -> OFFLINE", serviceName);
+
                         Thread.sleep(5000);
                         return;
                     }

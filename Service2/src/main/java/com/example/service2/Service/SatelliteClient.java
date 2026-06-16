@@ -232,7 +232,26 @@ public class SatelliteClient {
                         users.size());
 
                 for (UserDTO user : users) {
+
                     FaultState.FaultConfig fault = faultState.get();
+
+                    // OFFLINE – pętla śpi, health zgłosi DOWN
+                    if (fault.faultType() == FaultState.FaultType.OFFLINE) {
+                        loopRunning.set(false);
+                        failureReason.set("Tryb OFFLINE (fault injection)");
+
+                        logger.warn("{} -> OFFLINE", serviceName);
+
+                        Thread.sleep(5000);
+                        return;
+                    }
+                    // DROP – losowe pomijanie głosów
+                    if (fault.faultType() == FaultState.FaultType.DROP) {
+                        if (Math.random() * 100 < fault.dropRate()) {
+                            logger.info("DROP fault – pomijam głos dla user={}", user.id());
+                            continue;
+                        }
+                    }
                     List<SubscribedUserDTO> subscriptions =
                             fetchSubscriptions(user.id());
 
@@ -262,20 +281,7 @@ public class SatelliteClient {
                             user.id(),
                             bestCategory
                     );
-                    // OFFLINE – pętla śpi, health zgłosi DOWN
-                    if (fault.faultType() == FaultState.FaultType.OFFLINE) {
-                        loopRunning.set(false);
-                        failureReason.set("Tryb OFFLINE (fault injection)");
-                        Thread.sleep(5000);
-                        return;
-                    }
-                    // DROP – losowe pomijanie głosów
-                    if (fault.faultType() == FaultState.FaultType.DROP) {
-                        if (Math.random() * 100 < fault.dropRate()) {
-                            logger.info("DROP fault – pomijam głos dla user={}", user.id());
-                            continue;
-                        }
-                    }
+
 
                     Thread.sleep(200);
                 }
