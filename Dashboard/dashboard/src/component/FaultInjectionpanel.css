@@ -1,0 +1,410 @@
+/* ═══════════════════════════════════════════════════
+   Fault Injection Panel
+   Dopasowany do Wbftmonitor.css (industrial dark)
+═══════════════════════════════════════════════════ */
+
+.fi-desc {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text2);
+  margin-bottom: 14px;
+  letter-spacing: .02em;
+}
+
+.fi-desc code {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+/* ── Service grid ── */
+
+.fi-svc-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+@media (max-width: 900px) {
+  .fi-svc-grid { grid-template-columns: repeat(4, 1fr); }
+}
+
+.fi-svc-card {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 8px;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color .15s, background .15s;
+}
+
+.fi-svc-card:hover {
+  border-color: var(--border2);
+  background: rgba(255,255,255,.04);
+}
+
+.fi-svc-card--selected {
+  border-color: var(--green);
+  background: var(--green-bg);
+}
+
+.fi-svc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 5px;
+}
+
+.fi-svc-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text2);
+}
+
+.fi-svc-card--selected .fi-svc-name {
+  color: var(--green);
+}
+
+.fi-svc-port {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text3);
+  margin-bottom: 6px;
+}
+
+.fi-svc-fault-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.fi-svc-fault-extra {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text3);
+}
+
+/* ── Status dot ── */
+
+.fi-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.fi-dot--up      { background: var(--green); }
+.fi-dot--down    { background: var(--red); }
+.fi-dot--unknown { background: var(--text3); }
+
+/* ── Fault badges ── */
+
+.fi-badge {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 2px;
+  letter-spacing: .03em;
+  white-space: nowrap;
+}
+
+.fi-badge--none  { background: var(--bg2);      color: var(--text3);  border: 1px solid var(--border); }
+.fi-badge--delay { background: var(--amber-bg);  color: var(--amber);  border: 1px solid rgba(245,158,11,.3); }
+.fi-badge--drop  { background: var(--red-bg);    color: var(--red);    border: 1px solid rgba(239,68,68,.3); }
+.fi-badge--byz   { background: rgba(139,92,246,.12); color: var(--purple); border: 1px solid rgba(139,92,246,.3); }
+.fi-badge--off   { background: var(--bg2);       color: var(--text3);  border: 1px solid var(--border); opacity: .7; }
+
+/* ── Config panel ── */
+
+.fi-config-panel {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.fi-config-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.fi-section-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+}
+
+.fi-sel-info {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text2);
+}
+
+/* ── Presets ── */
+
+.fi-presets-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text3);
+  letter-spacing: .05em;
+  margin-bottom: 7px;
+}
+
+.fi-presets-row {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.fi-preset-btn {
+  font-family: var(--mono);
+  font-size: 10px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  cursor: pointer;
+  color: var(--text2);
+  transition: all .15s;
+  white-space: nowrap;
+}
+
+.fi-preset-btn:hover {
+  background: var(--bg2);
+  color: var(--text);
+  border-color: rgba(255,255,255,.2);
+}
+
+/* ── Fault type tabs ── */
+
+.fi-fault-tabs {
+  display: flex;
+  gap: 2px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+  margin-bottom: 14px;
+}
+
+.fi-fault-tab {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .04em;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color .15s;
+  white-space: nowrap;
+}
+
+.fi-fault-tab:hover {
+  color: var(--text2);
+}
+
+.fi-fault-tab--active {
+  color: var(--text);
+  border-bottom-color: var(--green);
+}
+
+/* ── Params area ── */
+
+.fi-param-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.fi-param-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text2);
+  min-width: 150px;
+}
+
+.fi-param-val {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text);
+  min-width: 50px;
+}
+
+.fi-param-hint {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text3);
+  margin-top: 4px;
+  margin-bottom: 0;
+  line-height: 1.6;
+}
+
+.fi-param-row select {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 10px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 5px 8px;
+  cursor: pointer;
+  outline: none;
+}
+
+.fi-param-row select:focus {
+  border-color: rgba(29,158,117,.5);
+}
+
+.fi-param-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--green);
+  cursor: pointer;
+}
+
+/* ── Action bar ── */
+
+.fi-action-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.fi-btn-send {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .04em;
+  background: var(--green);
+  color: #0d0f12;
+  border: none;
+  border-radius: var(--radius);
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: opacity .15s;
+  white-space: nowrap;
+}
+
+.fi-btn-send:hover {
+  opacity: .85;
+}
+
+.fi-btn-send:disabled {
+  background: var(--bg3);
+  color: var(--text3);
+  border: 1px solid var(--border);
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.fi-btn-reset {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .04em;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  padding: 5px 11px;
+  cursor: pointer;
+  color: var(--text2);
+  transition: all .15s;
+}
+
+.fi-btn-reset:hover {
+  background: var(--bg2);
+  color: var(--text);
+  border-color: rgba(255,255,255,.2);
+}
+
+.fi-select-all {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text3);
+  cursor: pointer;
+  text-decoration: underline;
+  background: none;
+  border: none;
+  padding: 0;
+  letter-spacing: .04em;
+  transition: color .15s;
+}
+
+.fi-select-all:hover {
+  color: var(--text2);
+}
+
+/* ── Log area ── */
+
+.fi-log-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  margin-bottom: 8px;
+  display: block;
+}
+
+.fi-log-area {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.fi-log-area::-webkit-scrollbar { width: 4px; }
+.fi-log-area::-webkit-scrollbar-track { background: var(--bg); }
+.fi-log-area::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+.fi-log-empty {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text3);
+}
+
+.fi-log-row {
+  display: flex;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.fi-log-row:last-child {
+  border-bottom: none;
+}
+
+.fi-log-time {
+  color: var(--text3);
+  min-width: 60px;
+  flex-shrink: 0;
+}
+
+.fi-log--ok   { color: var(--green); }
+.fi-log--err  { color: var(--red); }
+.fi-log--info { color: var(--blue); }

@@ -5,6 +5,7 @@ import com.example.service1.Config.RabbitMQSatelliteConfig;
 import com.example.service1.DTO.MostWatchedCategoryMessage;
 import com.example.service1.DTO.UserDTO;
 import com.example.service1.DTO.WatchHistoryDTO;
+import com.example.service1.Fault.FaultState;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import jakarta.annotation.PostConstruct;
@@ -60,6 +61,8 @@ public class SatelliteClient {
     private static final Path PRIVATE_KEY_FILE =
             Paths.get("keys", "service1-private.properties");
 
+    private final FaultState faultState;
+
     @Value("${satellite.name:Service1}")
     private String serviceName;
 
@@ -79,8 +82,10 @@ public class SatelliteClient {
     private PrivateKey privateKey;
     private PublicKey  publicKey;
 
-    public SatelliteClient(RabbitTemplate rabbitTemplate) {
+    // konstruktor:
+    public SatelliteClient(RabbitTemplate rabbitTemplate, FaultState faultState) {
         this.rabbitTemplate = rabbitTemplate;
+        this.faultState     = faultState;
         this.mapper = new ObjectMapper();
         this.mapper.registerModule(new JavaTimeModule());
     }
@@ -211,23 +216,43 @@ public class SatelliteClient {
                 logger.info("{} → przetwarzam {} użytkowników", serviceName, users.size());
 
                 for (UserDTO user : users) {
+                    FaultState.FaultConfig fault = faultState.get();
+
+                    // OFFLINE – pętla śpi, health zgłosi DOWN
+                    if (fault.faultType() == FaultState.FaultType.OFFLINE) {
+                        loopRunning.set(false);
+                        failureReason.set("Tryb OFFLINE (fault injection)");
+                        Thread.sleep(5000);
+                        return;
+                    }
+
                     List<WatchHistoryDTO> history = fetchWatchHistory(user.id());
-                    String bestCategory = calculateMostWatchedCategory(history);
+
+                    // DROP – losowe pomijanie głosów
+                    if (fault.faultType() == FaultState.FaultType.DROP) {
+                        if (Math.random() * 100 < fault.dropRate()) {
+                            logger.info("DROP fault – pomijam głos dla user={}", user.id());
+                            continue;
+                        }
+                    }
+
+                    // BYZANTINE – podmiana kategorii
+                    String bestCategory = fault.faultType() == FaultState.FaultType.BYZANTINE
+                            && fault.byzantineCategory() != null
+                            ? fault.byzantineCategory()
+                            : calculateMostWatchedCategory(history);
 
                     ServiceMessage message = buildSignedVote(user.id(), bestCategory);
-
-                    String routingKey = "vote." + serviceName;
                     rabbitTemplate.convertAndSend(
                             RabbitMQSatelliteConfig.VOTES_EXCHANGE,
-                            routingKey,
-                            message
-                    );
+                            "vote." + serviceName,
+                            message);
 
-                    int msgNum = messageCounter.incrementAndGet();
-                    logger.info("#{} → [{}] user={} category={}",
-                            msgNum, routingKey, user.id(), bestCategory);
-
-                    Thread.sleep(300);
+                    // DELAY – opóźnienie po wysłaniu
+                    long sleepMs = fault.faultType() == FaultState.FaultType.DELAY
+                            ? fault.delayMs()
+                            : 300;
+                    Thread.sleep(sleepMs);
                 }
 
             } catch (InterruptedException ie) {

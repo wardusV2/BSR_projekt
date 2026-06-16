@@ -3,7 +3,9 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Cell,
 } from "recharts";
+import FaultInjectionPanel from "./FaultInjectionPanel";
 import "./Wbftmonitor.css";
+import "./FaultInjectionpanel.css";
 
 const BASE = "http://localhost:8081";
 const SVC_NAMES = [
@@ -92,18 +94,6 @@ function MetricCard({ label, value, sub, danger, accent }) {
   );
 }
 
-function ServicePill({ name, status, lastSeen }) {
-  const short = name.replace("Service", "S");
-  return (
-    <div
-      className={`svc-pill svc-pill--${status}`}
-      title={`${name}${lastSeen ? " · " + ts(lastSeen) : " · nie widziano"}`}
-    >
-      {short}
-    </div>
-  );
-}
-
 function VoteBars({ logs }) {
   const rabbitLogs = logs.filter((l) => l.type === "RABBIT_IN" && l.content?.category);
   if (!rabbitLogs.length)
@@ -162,8 +152,6 @@ function WbftStatusChart({ wbftResults }) {
     </ResponsiveContainer>
   );
 }
-
-/* ─── WBFT Node Visualization ─────────────────────────────────────── */
 
 function NodeGrid({ result }) {
   if (!result) return <div className="empty-hint">Brak danych węzłów.</div>;
@@ -257,7 +245,6 @@ function WbftDetailPanel({ result }) {
 
   return (
     <>
-      {/* Verdict row */}
       <div className="verdict-box">
         <div className="verdict-row">
           <span className={`status-badge ${statusCls}`}>{status}</span>
@@ -286,11 +273,9 @@ function WbftDetailPanel({ result }) {
         )}
       </div>
 
-      {/* Node grid */}
       <div className="section-title" style={{ marginTop: 14 }}>Węzły satelitarne</div>
       <NodeGrid result={result} />
 
-      {/* Thresholds */}
       <div className="section-title" style={{ marginTop: 14 }}>Progi decyzyjne</div>
       <ThresholdBar
         label="Kworum zwycięzcy"
@@ -311,7 +296,6 @@ function WbftDetailPanel({ result }) {
         thresholdLabel="10%"
       />
 
-      {/* Weight distribution */}
       {catSorted.length > 0 && (
         <>
           <div className="section-title" style={{ marginTop: 14 }}>Wagi per kategoria</div>
@@ -357,14 +341,10 @@ function WbftHistory({ wbftResults }) {
             <span className="history-cat">{r.category}</span>
             <span className="history-ratio">{pct}</span>
             {suspects > 0 && (
-              <span className="byzantine-pill" style={{ fontSize: 10 }}>
-                {suspects}B
-              </span>
+              <span className="byzantine-pill" style={{ fontSize: 10 }}>{suspects}B</span>
             )}
             {timedOut > 0 && (
-              <span className="badge-timeout" style={{ fontSize: 10 }}>
-                {timedOut}T
-              </span>
+              <span className="badge-timeout" style={{ fontSize: 10 }}>{timedOut}T</span>
             )}
           </div>
         );
@@ -399,55 +379,24 @@ function LogRow({ log }) {
   );
 }
 
-/* ─── Satellite Health Panel ──────────────────────────────────────── */
-
 function SatelliteHealthPanel({ health }) {
   if (!health) {
-    return (
-      <div className="empty-hint">
-        Brak danych health monitor.
-      </div>
-    );
+    return <div className="empty-hint">Brak danych health monitor.</div>;
   }
-
   const services = Object.entries(health.services || {});
-
   return (
     <div className="sat-health-panel">
       <div className="health-summary">
-        <MetricCard
-          label="Satelity"
-          value={health.totalServices}
-          sub="łącznie"
-        />
-        <MetricCard
-          label="DOWN"
-          value={health.downCount}
-          sub="niedostępne"
-          danger={health.downCount > 0}
-        />
-        <MetricCard
-          label="Próg alarmu"
-          value={`${health.alertThresholdMs / 1000}s`}
-          sub="heartbeat timeout"
-        />
+        <MetricCard label="Satelity"     value={health.totalServices} sub="łącznie" />
+        <MetricCard label="DOWN"         value={health.downCount}     sub="niedostępne" danger={health.downCount > 0} />
+        <MetricCard label="Próg alarmu"  value={`${health.alertThresholdMs / 1000}s`} sub="heartbeat timeout" />
       </div>
-
       <div className="health-grid">
         {services.map(([name, svc]) => (
-          <div
-            key={name}
-            className={`health-card health-card--${svc.status?.toLowerCase()}`}
-          >
+          <div key={name} className={`health-card health-card--${svc.status?.toLowerCase()}`}>
             <div className="health-card-header">
               <strong>{name}</strong>
-              <span
-                className={`status-badge ${
-                  svc.status === "UP"
-                    ? "badge--unanimous"
-                    : "badge--noquorum"
-                }`}
-              >
+              <span className={`status-badge ${svc.status === "UP" ? "badge--unanimous" : "badge--noquorum"}`}>
                 {svc.status}
               </span>
             </div>
@@ -466,7 +415,13 @@ function SatelliteHealthPanel({ health }) {
 
 /* ─── Main component ──────────────────────────────────────────────── */
 
+const MAIN_TABS = [
+  { id: "monitor",        label: "Monitor" },
+  { id: "fault-injection", label: "Fault Injection" },
+];
+
 export default function WbftMonitor() {
+  const [mainTab,         setMainTab]         = useState("monitor");
   const [logs,            setLogs]            = useState([]);
   const [wbftResults,     setWbftResults]     = useState([]);
   const [activeUsers,     setActiveUsers]     = useState([]);
@@ -563,6 +518,7 @@ export default function WbftMonitor() {
 
   return (
     <div className="monitor">
+
       {/* ── Top bar ── */}
       <div className="top-bar">
         <div className="top-bar__left">
@@ -578,152 +534,164 @@ export default function WbftMonitor() {
         </div>
       </div>
 
-      {/* ── Metrics ── */}
-      <div className="metrics-grid">
-        <MetricCard label="Wiadomości" value={total || "—"} sub="łącznie" />
-        <MetricCard label="Aktywne rundy" value={activeUsers.length || "0"} sub="oczekują głosów" accent />
-        <MetricCard label="Głosy / min" value={rate} sub="ostatnie 60 s" />
-        <MetricCard label="Rundy WBFT" value={wbftResults.length} sub="zakończone" />
-        <MetricCard label="Byzantine" value={byzantineCount} sub="wykryte węzły" danger={byzantineCount > 0} />
-        <MetricCard label="Dead letter" value={dlx} sub="odrzucone" danger={dlx > 0} />
+      {/* ── Main tabs ── */}
+      <div className="main-tabs">
+        {MAIN_TABS.map(tab => (
+          <button
+            key={tab.id}
+            className={`main-tab-btn${mainTab === tab.id ? " main-tab-btn--active" : ""}`}
+            onClick={() => setMainTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
-      {/* ── Satellite Health ── */}
-      <div className="card">
-        <div className="section-title">Zdrowie serwisów satelitarnych</div>
-        <SatelliteHealthPanel health={satelliteHealth} />
-      </div>
-
-      {/* ── Main grid ── */}
-      <div className="main-grid">
-
-        {/* Left: serwisy + głosy */}
+      {/* ── Fault Injection tab ── */}
+      {mainTab === "fault-injection" && (
         <div className="card">
-          {/* <div className="section-title">Serwisy satelitarne</div>
-          <div className="services-grid">
-            {SVC_NAMES.map((svc) => (
-              <ServicePill
-                key={svc}
-                name={svc}
-                status={svcStatus[svc]?.status || "idle"}
-                lastSeen={svcStatus[svc]?.lastSeen}
-              />
-            ))}
-          </div> */}
-          <div className="section-title" style={{ marginTop: 16 }}>Rozkład głosów (ostatnie 35)</div>
-          <VoteBars logs={logs} />
+          <FaultInjectionPanel />
         </div>
+      )}
 
-        {/* Right: WBFT results */}
-        <div className="card">
-          <div className="card-tabs">
-            <button
-              className={`tab-btn${activeTab === "detail" ? " tab-btn--active" : ""}`}
-              onClick={() => setActiveTab("detail")}
-            >
-              Szczegóły wyniku
-            </button>
-            <button
-              className={`tab-btn${activeTab === "history" ? " tab-btn--active" : ""}`}
-              onClick={() => setActiveTab("history")}
-            >
-              Historia ({wbftResults.length})
-            </button>
-            <button
-              className={`tab-btn${activeTab === "chart" ? " tab-btn--active" : ""}`}
-              onClick={() => setActiveTab("chart")}
-            >
-              Wykres
-            </button>
+      {/* ── Monitor tab ── */}
+      {mainTab === "monitor" && (
+        <>
+          {/* Metrics */}
+          <div className="metrics-grid">
+            <MetricCard label="Wiadomości"   value={total || "—"}         sub="łącznie" />
+            <MetricCard label="Aktywne rundy" value={activeUsers.length || "0"} sub="oczekują głosów" accent />
+            <MetricCard label="Głosy / min"  value={rate}                 sub="ostatnie 60 s" />
+            <MetricCard label="Rundy WBFT"   value={wbftResults.length}   sub="zakończone" />
+            <MetricCard label="Byzantine"    value={byzantineCount}        sub="wykryte węzły" danger={byzantineCount > 0} />
+            <MetricCard label="Dead letter"  value={dlx}                  sub="odrzucone" danger={dlx > 0} />
           </div>
 
-          {activeTab === "detail" && (
-            <>
-              {sortedWbft.length > 1 && (
-                <div className="result-selector">
-                  <label className="result-selector-label">Runda:</label>
-                  <select
-                    className="result-selector-select"
-                    value={selectedIdx}
-                    onChange={e => setSelectedIdx(Number(e.target.value))}
-                  >
-                    {sortedWbft.map((r, i) => (
-                      <option key={i} value={i}>
-                        {ts(r.timestamp)} · u={r.userId} · {r.status}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              <WbftDetailPanel result={selectedResult} />
-            </>
-          )}
+          {/* Satellite Health */}
+          <div className="card">
+            <div className="section-title">Zdrowie serwisów satelitarnych</div>
+            <SatelliteHealthPanel health={satelliteHealth} />
+          </div>
 
-          {activeTab === "history" && (
-            <WbftHistory wbftResults={wbftResults} />
-          )}
+          {/* Main grid */}
+          <div className="main-grid">
 
-          {activeTab === "chart" && (
-            <>
-              <WbftStatusChart wbftResults={wbftResults} />
-              <div className="chart-legend">
-                {[
-                  { label: "UNANIMOUS", color: "#1D9E75" },
-                  { label: "CONSENSUS", color: "#3266ad" },
-                  { label: "NO_QUORUM", color: "#E24B4A" },
-                ].map(({ label, color }) => (
-                  <span key={label} className="chart-legend-item">
-                    <span className="chart-legend-dot" style={{ background: color }} />
-                    {label}
-                  </span>
-                ))}
+            <div className="card">
+              <div className="section-title" style={{ marginTop: 16 }}>Rozkład głosów (ostatnie 35)</div>
+              <VoteBars logs={logs} />
+            </div>
+
+            <div className="card">
+              <div className="card-tabs">
+                <button
+                  className={`tab-btn${activeTab === "detail" ? " tab-btn--active" : ""}`}
+                  onClick={() => setActiveTab("detail")}
+                >
+                  Szczegóły wyniku
+                </button>
+                <button
+                  className={`tab-btn${activeTab === "history" ? " tab-btn--active" : ""}`}
+                  onClick={() => setActiveTab("history")}
+                >
+                  Historia ({wbftResults.length})
+                </button>
+                <button
+                  className={`tab-btn${activeTab === "chart" ? " tab-btn--active" : ""}`}
+                  onClick={() => setActiveTab("chart")}
+                >
+                  Wykres
+                </button>
               </div>
-            </>
-          )}
-        </div>
-      </div>
 
-      {/* ── Logs ── */}
-      <div className="card">
-        <div className="log-header">
-          <div className="section-title" style={{ marginBottom: 0 }}>Logi komunikacji</div>
-          <div className="log-controls">
-            <select
-              value={filterType}
-              onChange={(e) => setFilterType(e.target.value)}
-              className="log-select"
-            >
-              <option value="">Wszystkie typy</option>
-              <option value="RABBIT_IN">RABBIT_IN</option>
-              <option value="WBFT">WBFT</option>
-              <option value="ERROR">ERROR</option>
-            </select>
-            <input
-              type="text"
-              placeholder="Serwis…"
-              value={filterSvc}
-              onChange={(e) => setFilterSvc(e.target.value)}
-              className="log-input"
-            />
-            <button
-              onClick={() => { setLogs([]); setWbftResults([]); setConnStatus("connecting"); }}
-              className="btn"
-            >
-              Wyczyść
-            </button>
+              {activeTab === "detail" && (
+                <>
+                  {sortedWbft.length > 1 && (
+                    <div className="result-selector">
+                      <label className="result-selector-label">Runda:</label>
+                      <select
+                        className="result-selector-select"
+                        value={selectedIdx}
+                        onChange={e => setSelectedIdx(Number(e.target.value))}
+                      >
+                        {sortedWbft.map((r, i) => (
+                          <option key={i} value={i}>
+                            {ts(r.timestamp)} · u={r.userId} · {r.status}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  <WbftDetailPanel result={selectedResult} />
+                </>
+              )}
+
+              {activeTab === "history" && (
+                <WbftHistory wbftResults={wbftResults} />
+              )}
+
+              {activeTab === "chart" && (
+                <>
+                  <WbftStatusChart wbftResults={wbftResults} />
+                  <div className="chart-legend">
+                    {[
+                      { label: "UNANIMOUS", color: "#1D9E75" },
+                      { label: "CONSENSUS",  color: "#3266ad" },
+                      { label: "NO_QUORUM",  color: "#E24B4A" },
+                    ].map(({ label, color }) => (
+                      <span key={label} className="chart-legend-item">
+                        <span className="chart-legend-dot" style={{ background: color }} />
+                        {label}
+                      </span>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
-        </div>
-        <div className="log-list">
-          {filteredLogs.length === 0
-            ? <div className="empty-hint">Brak pasujących logów.</div>
-            : filteredLogs.map((log, i) => <LogRow key={i} log={log} />)
-          }
-        </div>
-      </div>
 
-      <div className="footer-hint">
-        Dane z <code>localhost:8081/monitor</code> · odświeżanie co 5 s
-      </div>
+          {/* Logs */}
+          <div className="card">
+            <div className="log-header">
+              <div className="section-title" style={{ marginBottom: 0 }}>Logi komunikacji</div>
+              <div className="log-controls">
+                <select
+                  value={filterType}
+                  onChange={(e) => setFilterType(e.target.value)}
+                  className="log-select"
+                >
+                  <option value="">Wszystkie typy</option>
+                  <option value="RABBIT_IN">RABBIT_IN</option>
+                  <option value="WBFT">WBFT</option>
+                  <option value="ERROR">ERROR</option>
+                </select>
+                <input
+                  type="text"
+                  placeholder="Serwis…"
+                  value={filterSvc}
+                  onChange={(e) => setFilterSvc(e.target.value)}
+                  className="log-input"
+                />
+                <button
+                  onClick={() => { setLogs([]); setWbftResults([]); setConnStatus("connecting"); }}
+                  className="btn"
+                >
+                  Wyczyść
+                </button>
+              </div>
+            </div>
+            <div className="log-list">
+              {filteredLogs.length === 0
+                ? <div className="empty-hint">Brak pasujących logów.</div>
+                : filteredLogs.map((log, i) => <LogRow key={i} log={log} />)
+              }
+            </div>
+          </div>
+
+          <div className="footer-hint">
+            Dane z <code>localhost:8081/monitor</code> · odświeżanie co 5 s
+          </div>
+        </>
+      )}
     </div>
   );
 }

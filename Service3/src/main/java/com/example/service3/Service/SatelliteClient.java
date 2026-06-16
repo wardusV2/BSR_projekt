@@ -4,6 +4,7 @@ import com.example.mainservice.DTO.ServiceMessage;
 import com.example.service3.DTO.LikedVideoDTO;
 import com.example.service3.DTO.SubscribedCategoryMessage;
 import com.example.service3.DTO.UserDTO;
+import com.example.service3.Fault.FaultState;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
@@ -52,7 +53,7 @@ public class SatelliteClient {
 
     private final AtomicBoolean loopRunning = new AtomicBoolean(false);
     private final AtomicReference<String> failureReason = new AtomicReference<>(null);
-
+    private final Random random = new Random();
 
     @Value("${satellite.name:Service3}")
     private String serviceName;
@@ -64,11 +65,12 @@ public class SatelliteClient {
     private final AtomicInteger  counter    = new AtomicInteger();
     private final HttpClient     httpClient = HttpClient.newHttpClient();
     private final ObjectMapper   mapper     = new ObjectMapper();
+    private final FaultState faultState;
 
 
-
-    public SatelliteClient(RabbitTemplate rabbitTemplate) {
+    public SatelliteClient(RabbitTemplate rabbitTemplate, FaultState faultState) {
         this.rabbitTemplate = rabbitTemplate;
+        this.faultState = faultState;
     }
 
     // ── Inicjalizacja ─────────────────────────────────────────────────────────
@@ -78,7 +80,66 @@ public class SatelliteClient {
         loadOrCreateKeys();
         startLoop();
     }
+    private void applyFault() throws Exception {
+        FaultState.FaultConfig cfg = faultState.get();
 
+        switch (cfg.faultType()) {
+
+            case NONE:
+                return;
+
+            case DELAY:
+                logger.warn("FAULT DELAY {} ms", cfg.delayMs());
+                Thread.sleep(cfg.delayMs());
+                return;
+
+            case DROP:
+                if (random.nextInt(100) < cfg.dropRate()) {
+                    logger.warn("FAULT DROP");
+                    throw new RuntimeException("Message dropped");
+                }
+                return;
+
+            case BYZANTINE:
+                return;
+        }
+    }
+
+    private boolean shouldDrop() {
+        FaultState.FaultConfig cfg = faultState.get();
+
+        return cfg.faultType() == FaultState.FaultType.DROP
+                && random.nextInt(100) < cfg.dropRate();
+    }
+
+    private String applyByzantine(String category) {
+
+        FaultState.FaultConfig cfg = faultState.get();
+
+        if (cfg.faultType() != FaultState.FaultType.BYZANTINE) {
+            return category;
+        }
+
+        return switch (cfg.byzantineCategory()) {
+
+            case "RANDOM" -> {
+                String[] categories = {
+                        "SPORT",
+                        "MUSIC",
+                        "NEWS",
+                        "GAMING",
+                        "POLITICS"
+                };
+                yield categories[random.nextInt(categories.length)];
+            }
+
+            case "INVALID" -> "###INVALID###";
+
+            case "NULL" -> null;
+
+            default -> cfg.byzantineCategory();
+        };
+    }
     private void loadOrCreateKeys() {
         try {
 
@@ -204,16 +265,60 @@ public class SatelliteClient {
                 logger.info("{} → przetwarzam {} użytkowników", serviceName, users.size());
 
                 for (UserDTO user : users) {
-                    List<LikedVideoDTO> likedVideos = fetchLikedVideos(user.id());
-                    String bestCategory = calculateCategoryFromLikes(likedVideos);
 
-                    ServiceMessage message = buildSignedVote(user.id(), bestCategory);
+                    FaultState.FaultConfig fault = faultState.get();
 
-                    String routingKey = "vote." + serviceName;
-                    rabbitTemplate.convertAndSend("votes.topic", routingKey, message);
+                    if (fault.faultType() == FaultState.FaultType.OFFLINE) {
+                        loopRunning.set(false);
+                        failureReason.set("Tryb OFFLINE (fault injection)");
 
-                    logger.info("#{} → [{}] user={} category={}",
-                            counter.incrementAndGet(), routingKey, user.id(), bestCategory);
+                        logger.warn("{} -> OFFLINE", serviceName);
+
+                        Thread.sleep(5000);
+                        return;
+                    }
+
+                    List<LikedVideoDTO> likedVideos =
+                            fetchLikedVideos(user.id());
+
+                    String bestCategory =
+                            calculateCategoryFromLikes(likedVideos);
+
+                    bestCategory =
+                            applyByzantine(bestCategory);
+
+                    if (shouldDrop()) {
+                        logger.warn(
+                                "FAULT DROP -> user {} skipped",
+                                user.id()
+                        );
+                        continue;
+                    }
+
+                    applyFault();
+
+                    ServiceMessage message =
+                            buildSignedVote(
+                                    user.id(),
+                                    bestCategory
+                            );
+
+                    String routingKey =
+                            "vote." + serviceName;
+
+                    rabbitTemplate.convertAndSend(
+                            "votes.topic",
+                            routingKey,
+                            message
+                    );
+
+                    logger.info(
+                            "#{} → [{}] user={} category={}",
+                            counter.incrementAndGet(),
+                            routingKey,
+                            user.id(),
+                            bestCategory
+                    );
 
                     Thread.sleep(200);
                 }
@@ -251,11 +356,28 @@ public class SatelliteClient {
 
     private List<UserDTO> fetchUsers() {
         try {
+
+            applyFault();
+
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(USERS_URL))
-                    .header("X-SERVICE-KEY", SERVICE_API_KEY).GET().build();
-            HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-            return Arrays.asList(mapper.readValue(res.body(), UserDTO[].class));
+                    .header("X-SERVICE-KEY", SERVICE_API_KEY)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> res =
+                    httpClient.send(
+                            req,
+                            HttpResponse.BodyHandlers.ofString()
+                    );
+
+            return Arrays.asList(
+                    mapper.readValue(
+                            res.body(),
+                            UserDTO[].class
+                    )
+            );
+
         } catch (Exception e) {
             logger.error("Cannot fetch users", e);
             return List.of();
@@ -264,13 +386,34 @@ public class SatelliteClient {
 
     private List<LikedVideoDTO> fetchLikedVideos(int userId) {
         try {
+
+            applyFault();
+
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(USER_LIKED_URL + userId + "/liked"))
-                    .header("X-SERVICE-KEY", SERVICE_API_KEY).GET().build();
-            HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
-            return Arrays.asList(mapper.readValue(res.body(), LikedVideoDTO[].class));
+                    .header("X-SERVICE-KEY", SERVICE_API_KEY)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> res =
+                    httpClient.send(
+                            req,
+                            HttpResponse.BodyHandlers.ofString()
+                    );
+
+            return Arrays.asList(
+                    mapper.readValue(
+                            res.body(),
+                            LikedVideoDTO[].class
+                    )
+            );
+
         } catch (Exception e) {
-            logger.warn("No liked videos for user {}", userId, e);
+            logger.warn(
+                    "No liked videos for user {}",
+                    userId,
+                    e
+            );
             return List.of();
         }
     }

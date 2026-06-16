@@ -5,6 +5,8 @@ import heroImg from './assets/hero.png'
 import './App.css'
 import WbftMonitor from "./component/Wbftmonitor"
 
+
 export default function App() {
   return <WbftMonitor />;
+
 }

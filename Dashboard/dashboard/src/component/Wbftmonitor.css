@@ -855,3 +855,37 @@
 .health-silence--ok   { color: var(--green) !important; }
 .health-silence--warn { color: var(--amber) !important; }
 .health-silence--crit { color: var(--red)   !important; }
+
+.main-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+}
+ 
+.main-tab-btn {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .04em;
+  padding: 7px 16px;
+  border: none;
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color .15s;
+  white-space: nowrap;
+}
+ 
+.main-tab-btn:hover {
+  color: var(--text2);
+}
+ 
+.main-tab-btn--active {
+  color: var(--text);
+  border-bottom-color: var(--green);
+  font-weight: 500;
+}

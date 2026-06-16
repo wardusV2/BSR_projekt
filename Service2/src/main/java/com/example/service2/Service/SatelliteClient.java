@@ -2,6 +2,7 @@ package com.example.service2.Service;
 
 import com.example.mainservice.DTO.ServiceMessage;
 import com.example.service2.DTO.*;
+import com.example.service2.Fault.FaultState;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
@@ -68,7 +69,7 @@ public class SatelliteClient {
     private final AtomicInteger  counter    = new AtomicInteger();
     private final HttpClient     httpClient = HttpClient.newHttpClient();
     private final ObjectMapper   mapper     = new ObjectMapper();
-
+    private final FaultState faultState;
     private PrivateKey privateKey;
     private PublicKey publicKey;
 
@@ -77,8 +78,9 @@ public class SatelliteClient {
     private static final Path PRIVATE_KEY_FILE =
             Paths.get("keys", "service2-private.properties");
 
-    public SatelliteClient(RabbitTemplate rabbitTemplate) {
+    public SatelliteClient(RabbitTemplate rabbitTemplate, FaultState faultState) {
         this.rabbitTemplate = rabbitTemplate;
+        this.faultState = faultState;
     }
 
     // ── Inicjalizacja ─────────────────────────────────────────────────────────
@@ -230,7 +232,7 @@ public class SatelliteClient {
                         users.size());
 
                 for (UserDTO user : users) {
-
+                    FaultState.FaultConfig fault = faultState.get();
                     List<SubscribedUserDTO> subscriptions =
                             fetchSubscriptions(user.id());
 
@@ -260,6 +262,20 @@ public class SatelliteClient {
                             user.id(),
                             bestCategory
                     );
+                    // OFFLINE – pętla śpi, health zgłosi DOWN
+                    if (fault.faultType() == FaultState.FaultType.OFFLINE) {
+                        loopRunning.set(false);
+                        failureReason.set("Tryb OFFLINE (fault injection)");
+                        Thread.sleep(5000);
+                        return;
+                    }
+                    // DROP – losowe pomijanie głosów
+                    if (fault.faultType() == FaultState.FaultType.DROP) {
+                        if (Math.random() * 100 < fault.dropRate()) {
+                            logger.info("DROP fault – pomijam głos dla user={}", user.id());
+                            continue;
+                        }
+                    }
 
                     Thread.sleep(200);
                 }
