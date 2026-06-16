@@ -3,12 +3,47 @@
   <component name="CompilerConfiguration">
     <annotationProcessing>
       <profile default="true" name="Default" enabled="true" />
+      <profile name="Maven default annotation processors profile" enabled="true">
+        <sourceOutputDir name="target/generated-sources/annotations" />
+        <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
+        <outputRelativeToContentRoot value="true" />
+        <module name="safelogin" />
+      </profile>
+      <profile name="Annotation profile for Service3" enabled="true">
+        <sourceOutputDir name="target/generated-sources/annotations" />
+        <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
+        <outputRelativeToContentRoot value="true" />
+        <processorPath useClasspath="false">
+          <entry name="$MAVEN_REPOSITORY$/org/projectlombok/lombok/unknown/lombok-unknown.jar" />
+        </processorPath>
+        <module name="MainService" />
+        <module name="Service3 (1)" />
+        <module name="Service3" />
+        <module name="Service2" />
+        <module name="Service3 (2)" />
+        <module name="Service1" />
+        <module name="Service2 (1)" />
+        <module name="Service1 (1)" />
+      </profile>
     </annotationProcessing>
     <bytecodeTargetLevel>
-      <module name="Service1 (1)" target="17" />
-      <module name="Service2 (1)" target="17" />
-      <module name="Service3 (1)" target="17" />
-      <module name="Service3 (2)" target="17" />
+      <module name="Service3 (3)" target="17" />
+      <module name="Service4" target="17" />
+      <module name="Service5" target="17" />
+      <module name="Service6" target="17" />
     </bytecodeTargetLevel>
+  </component>
+  <component name="JavacSettings">
+    <option name="ADDITIONAL_OPTIONS_OVERRIDE">
+      <module name="MainService" options="-parameters" />
+      <module name="Service1" options="-parameters" />
+      <module name="Service1 (1)" options="-parameters" />
+      <module name="Service2" options="-parameters" />
+      <module name="Service2 (1)" options="-parameters" />
+      <module name="Service3" options="-parameters" />
+      <module name="Service3 (1)" options="-parameters" />
+      <module name="Service3 (2)" options="-parameters" />
+      <module name="safelogin" options="-parameters" />
+    </option>
   </component>
 </project>
