@@ -1,0 +1,17 @@
+package com.example.service5.DTO;
+
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class UserDTOTest {
+
+    @Test
+    void shouldCreateUserDto() {
+
+        UserDTO dto = new UserDTO(1, "john");
+
+        assertThat(dto.id()).isEqualTo(1);
+        assertThat(dto.nick()).isEqualTo("john");
+    }
+}
