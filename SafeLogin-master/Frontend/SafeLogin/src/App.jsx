@@ -15,7 +15,8 @@ import MenuItems from './components/MenuItems';
 import VideoPlayer from './pages/VideoPlayer';
 import AddVideo from './pages/AddVideo';
 
-import Wbfmonitor from './components/Wbftmonitor'
+import Wbfmonitor from './components/Wbftmonitor';
+import WbfMonitorGuard from './components/WbfMonitorGuard';
 
 
 const { Header, Content, Footer } = Layout;
@@ -63,7 +64,16 @@ const AppContent = () => {
                         <Route path="/search" element={<PrivateRoute><Search /></PrivateRoute>} />
                         <Route path="/video/:id" element={<PrivateRoute><VideoPlayer /></PrivateRoute>} />
                         <Route path="/addvideo" element={<AddVideo />} />
-                        <Route path="/wbfmonitor" element={<Wbfmonitor />} />
+                        <Route
+                              path="/wbfmonitor"
+                              element={
+                                <PrivateRoute>
+                                  <WbfMonitorGuard>
+                                    <Wbfmonitor />
+                                  </WbfMonitorGuard>
+                                </PrivateRoute>
+                              }
+                            />
                       </Routes>
           </Content>
         </Layout>

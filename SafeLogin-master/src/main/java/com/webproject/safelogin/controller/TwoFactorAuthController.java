@@ -3,6 +3,7 @@ package com.webproject.safelogin.controller;
 import com.warrenstrange.googleauth.GoogleAuthenticator;
 import com.webproject.safelogin.model.TotpRequest;
 import com.webproject.safelogin.model.User;
+import com.webproject.safelogin.service.EmailCodeRequest;
 import com.webproject.safelogin.service.UserService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpSession;
@@ -16,6 +17,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.security.Principal;
+import java.time.LocalDateTime;
 
 @RestController
 public class TwoFactorAuthController {
@@ -65,6 +67,46 @@ public class TwoFactorAuthController {
 
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("Invalid TOTP code");
         }
+    }
+    @PostMapping("/wbfmonitor/verify")
+    public ResponseEntity<?> verifyCode(
+            @RequestBody EmailCodeRequest request,
+            HttpServletRequest httpRequest) {
+
+        HttpSession session = httpRequest.getSession(false);
+
+        if(session == null) {
+            return ResponseEntity.badRequest().build();
+        }
+
+        String savedCode =
+                (String) session.getAttribute("wbf_code");
+
+        LocalDateTime expiration =
+                (LocalDateTime) session.getAttribute(
+                        "wbf_code_expiration");
+
+        if(expiration == null ||
+                LocalDateTime.now().isAfter(expiration)) {
+
+            return ResponseEntity
+                    .status(HttpStatus.UNAUTHORIZED)
+                    .body("Code expired");
+        }
+
+        if(savedCode.equals(request.getCode())) {
+
+            session.setAttribute("wbf_verified", true);
+
+            session.removeAttribute("wbf_code");
+            session.removeAttribute("wbf_code_expiration");
+
+            return ResponseEntity.ok("Verified");
+        }
+
+        return ResponseEntity
+                .status(HttpStatus.UNAUTHORIZED)
+                .body("Invalid code");
     }
 
 }
